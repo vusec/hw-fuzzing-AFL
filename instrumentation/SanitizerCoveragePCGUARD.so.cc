@@ -219,13 +219,17 @@ class ModuleSanitizerCoverageAFL
     if (getenv("HWFUZZ_NO_DFSAN"))
       return false;
 
-    // Optionally mark loads as providing feedback on taint..
+    // Optionally mark loads as providing feedback on taint.
     if (getenv("HWFUZZ_NO_LOAD") == nullptr)
       if (isa<LoadInst>(inst))
         return true;
 
-    // Stores are always interesting.
-    return isa<StoreInst>(inst);
+    // Optionally mark stores as providing feedback on taint.
+    if (getenv("HWFUZZ_NO_STORE") == nullptr)
+      if (isa<StoreInst>(inst))
+        return true;
+
+    return false;
   }
 
   void doTaintFeedback(llvm::Instruction &i, unsigned long map_offset) {
