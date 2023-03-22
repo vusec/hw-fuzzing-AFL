@@ -19,7 +19,6 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/Dominators.h"
-#include "llvm/IR/EHPersonalities.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
@@ -38,7 +37,8 @@
 #include "llvm/Support/SpecialCaseList.h"
 #include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/TargetParser/Triple.h"
+#include "llvm/Object/Binary.h"
+#include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/Transforms/Instrumentation.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
@@ -167,6 +167,12 @@ class ModuleSanitizerCoverageAFL
   std::pair<Value *, Value *> CreateSecStartEnd(Module &M, const char *Section,
                                                 Type *Ty);
 
+  void SetNoSanitizeMetadata(Value *V) {
+    Instruction *I = dyn_cast<Instruction>(V);
+    if (I)
+      SetNoSanitizeMetadata(I);
+  }
+
   void SetNoSanitizeMetadata(Instruction *I) {
 
     I->setMetadata(I->getModule()->getMDKindID("nosanitize"),
@@ -207,6 +213,100 @@ class ModuleSanitizerCoverageAFL
   ConstantInt    *One = NULL;
   ConstantInt    *Zero = NULL;
 
+  // DFSan stuff
+  bool providesFeedback(const Instruction &inst) {
+    // Disable all instrumentation if HWFUZZ_NO_DFSAN is set.
+    if (getenv("HWFUZZ_NO_DFSAN"))
+      return false;
+
+    // Optionally mark loads as providing feedback on taint..
+    if (getenv("HWFUZZ_NO_LOAD") == nullptr)
+      if (isa<LoadInst>(inst))
+        return true;
+
+    // Stores are always interesting.
+    return isa<StoreInst>(inst);
+  }
+
+  void doTaintFeedback(llvm::Instruction &i, unsigned long map_offset) {
+    if (!providesFeedback(i)) {
+      llvm::errs() << "Called on bogus instruction? " << i;
+      std::abort();
+    }
+
+    // Find the pointer that we want to check the taint value for.
+    // For load/stores it's just the pointer where the value is stored/loaded
+    // from/to.
+    Value *ptr = nullptr;
+    if (auto *load = dyn_cast<LoadInst>(&i))
+      ptr = load->getPointerOperand();
+    else if (auto *store = dyn_cast<StoreInst>(&i))
+      ptr = store->getPointerOperand();
+    else {
+      llvm::errs() << "Called on bogus instruction? " << i;
+      std::abort();
+    }
+    if (!ptr->getType()->isPointerTy())  {
+      llvm::errs() << "Not a pointer type?" << *ptr;
+      std::abort();
+    }
+
+    // Add taint instrumentation after the load/store.
+    // We do it after so that we can read the value taint for stores.
+    IRBuilder<> IRB((&i)->getNextNode());
+
+    // Calculate the shadow address of the loaded/store pointer.
+    Value *OffsetLong = IRB.CreatePointerCast(ptr, IntptrTy);
+    SetNoSanitizeMetadata(OffsetLong);
+    // The XOR mask that maps memory to shadow memory in DFSan.
+    const uint64_t XorMask = 0x500000000000;
+    // Map the address we're inspecting to the shadow memory.
+    Value *shadowAddr = IRB.CreateXor(OffsetLong, ConstantInt::get(IntptrTy, XorMask));
+    SetNoSanitizeMetadata(shadowAddr);
+
+    // Cast the shadow address to a proper pointer.
+    Value *shadowPtr = IRB.CreateIntToPtr(shadowAddr, Int8PtrTy);
+    SetNoSanitizeMetadata(shadowPtr);
+
+    // Load the shadow value that has the label.
+    LoadInst *dfsanLabel = IRB.CreateLoad(Int8Ty, shadowPtr);
+    SetNoSanitizeMetadata(dfsanLabel);
+
+    // Now load the AFL++ coverage map.
+    LoadInst *MapPtr =
+        IRB.CreateLoad(PointerType::get(Int8Ty, 0), AFLMapPtr);
+    ModuleSanitizerCoverageAFL::SetNoSanitizeMetadata(MapPtr);
+
+    // Find the offset in the map we can use to give feedback.
+    Value *map_offset_ptr = ConstantInt::get(IntptrTy, map_offset);
+    Value *abs_map_ptr = IRB.CreateAdd( IRB.CreatePointerCast(FunctionGuardArray,
+                                                       IntptrTy), map_offset_ptr);
+    SetNoSanitizeMetadata(abs_map_ptr);
+
+    // Cast that offset to a pointer.
+    Value *coverage_counter_ptr = IRB.CreateIntToPtr(abs_map_ptr, Int32PtrTy);
+    SetNoSanitizeMetadata(coverage_counter_ptr);
+
+    // Load the old value.
+    LoadInst *CurLoc = IRB.CreateLoad(IRB.getInt32Ty(), coverage_counter_ptr);
+    SetNoSanitizeMetadata(CurLoc);
+
+    // Load whatever coverage we already got.
+    Value    * MapPtrIdx = IRB.CreateGEP(Int8Ty, MapPtr, CurLoc);
+    SetNoSanitizeMetadata(MapPtrIdx);
+
+    LoadInst *Counter = IRB.CreateLoad(IRB.getInt8Ty(), MapPtrIdx);
+    SetNoSanitizeMetadata(Counter);
+
+    // Add the current label value to the counter. Untainted is label 0, so
+    // this means that for tainted memory this increases coverage.
+    Value *Incr = IRB.CreateAdd(Counter, dfsanLabel);
+    SetNoSanitizeMetadata(Incr);
+
+    // Store the updated coverage back to the map so AFL++ sees it.
+    StoreInst *StoreCtx = IRB.CreateStore(Incr, MapPtrIdx);
+    SetNoSanitizeMetadata(StoreCtx);
+  }
 };
 
 }  // namespace
@@ -806,6 +906,10 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
   uint32_t        cnt_cov = 0, cnt_sel = 0, cnt_sel_inc = 0;
   static uint32_t first = 1;
 
+  // How many instructions provide additional feedback based on taint.
+  // Used to scale the coverage bitmap.
+  uint32_t taint_feedback_instructions = 0;
+
   for (auto &BB : F) {
 
     for (auto &IN : BB) {
@@ -837,6 +941,13 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
         }
 
       }
+
+      // If this instruction provides taint-based coverage feedback, then
+      // increase the bitmap counter so we reserve a feedback byte for it
+      // in the coverage map.
+      if (providesFeedback(IN))
+        taint_feedback_instructions++;
+
 
       SelectInst *selectInst = nullptr;
 
@@ -873,9 +984,16 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
   }
 
   /* Create PCGUARD array */
-  CreateFunctionLocalArrays(F, AllBlocks, first + cnt_cov + cnt_sel_inc);
+  CreateFunctionLocalArrays(F, AllBlocks, first + cnt_cov + cnt_sel_inc +
+                            taint_feedback_instructions);
   if (first) { first = 0; }
   selects += cnt_sel;
+
+  struct DelayedDFSanInstrumentation {
+    unsigned long mapPos = 0;
+    Instruction *toInstrument = nullptr;
+  };
+  std::vector<DelayedDFSanInstrumentation> toInstrumentForDFSan;
 
   uint32_t special = 0, local_selects = 0, skip_next = 0;
 
@@ -921,6 +1039,19 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
 
         callInst->setOperand(1, Idx);
 
+      }
+
+      // Queue to be instrumented for DFSan instrumentation.
+      // We can' do this here as we iterate over a list of instructions. I don't
+      // know how the rest of this code works, but I also don't have brain worms.
+      if (!skip_next && providesFeedback(IN)) {
+        auto map_offset = (cnt_cov + local_selects + AllBlocks.size()) * 4;
+        // Pretend we added a select. This avoid that the code below
+        // adds bogus counter writes at the wrong offset.
+        ++local_selects;
+        toInstrumentForDFSan.push_back({map_offset, &IN});
+        ++instr;
+        continue;
       }
 
       SelectInst *selectInst = nullptr;
@@ -1142,6 +1273,10 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
       }
 
     }
+
+    // Now add the DFSan taint feedback for every instruction we found above.
+    for (const auto &target : toInstrumentForDFSan)
+      doTaintFeedback(*target.toInstrument, target.mapPos);
 
   }
 
