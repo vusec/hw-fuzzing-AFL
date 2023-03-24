@@ -1278,11 +1278,12 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
 
     }
 
-    // Now add the DFSan taint feedback for every instruction we found above.
-    for (const auto &target : toInstrumentForDFSan)
-      doTaintFeedback(*target.toInstrument, target.mapPos);
-
   }
+
+  // Now add the DFSan taint feedback for every instruction we found above.
+  for (const auto &target : toInstrumentForDFSan)
+    doTaintFeedback(*target.toInstrument, target.mapPos);
+
 
   if (AllBlocks.empty() && !special && !local_selects) return false;
 
