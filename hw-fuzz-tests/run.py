@@ -11,13 +11,13 @@ def call(cmd):
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
 
-os.environ["PATH"] = path.join(script_dir, "..") + ":" + os.environ["PATH"]
-
 disable_env_var = "HWFUZZ_NO_DFSAN"
 
 os.environ[disable_env_var] = "1"
 call("make -C ..")
 del os.environ[disable_env_var]
+
+os.environ["PATH"] = path.join(script_dir, "..") + ":" + os.environ["PATH"]
 
 call("afl-clang-fast++ -fsanitize-ignorelist=ignore_list -fsanitize=dataflow -o target_taint test.cpp")
 

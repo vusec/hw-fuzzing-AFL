@@ -46,7 +46,10 @@ void target_function(char *buf, size_t len) {
   Step step4('4');
   step4.set(11, step3.getCharOrNull(*(++buf)));
 
-  if (dfsan_get_label(step4.storage[11]) == label) {
+  Step step5('5');
+  step5.set(3, step4.getCharOrNull(*(++buf)));
+
+  if (dfsan_get_label(step5.storage[3]) == label) {
     fprintf(stderr, "Got magic input\n");
     abort();
   }
