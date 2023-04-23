@@ -215,6 +215,12 @@ class ModuleSanitizerCoverageAFL
 
   // DFSan stuff
   bool providesFeedback(const Instruction &inst) {
+    // Do not touch code injected by AFL++ itself (which has nosanitize MD).
+    // This code never has meaningful taint and just loads AFL++ stuff like
+    // the coverage map.
+    if (inst.hasMetadata(llvm::LLVMContext::MD_nosanitize))
+      return false;
+
     // Disable all instrumentation if HWFUZZ_NO_DFSAN is set.
     if (getenv("HWFUZZ_NO_DFSAN"))
       return false;
