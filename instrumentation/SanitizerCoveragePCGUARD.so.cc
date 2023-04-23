@@ -1482,7 +1482,7 @@ void ModuleSanitizerCoverageAFL::InjectCoverageAtBlock(Function   &F,
 
   }
 
-  if (Options.TracePCGuard) {
+  if (Options.TracePCGuard && getenv("HWFUZZ_NO_BLOCKS") == nullptr) {
 
     /* Get CurLoc */
 
