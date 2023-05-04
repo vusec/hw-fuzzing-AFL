@@ -307,14 +307,22 @@ class ModuleSanitizerCoverageAFL
 
     LoadInst *Counter = IRB.CreateLoad(IRB.getInt8Ty(), MapPtrIdx);
     SetNoSanitizeMetadata(Counter);
+    Value *ToStore = nullptr;
 
-    // Add the current label value to the counter. Untainted is label 0, so
-    // this means that for tainted memory this increases coverage.
-    Value *Incr = IRB.CreateAdd(Counter, dfsanLabel);
-    SetNoSanitizeMetadata(Incr);
+    if (getenv("HWFUZZ_COUNT_TAINT") != nullptr) {
+      // Add the current label value to the counter. Untainted is label 0, so
+      // this means that for tainted memory this increases coverage.
+      ToStore = IRB.CreateAdd(Counter, dfsanLabel);
+      SetNoSanitizeMetadata(ToStore);
+    } else {
+      // Just or-in the label which is either 0 (no coverage and no taint)
+      // or non-zero (coverage and taint).
+      ToStore = IRB.CreateOr(Counter, dfsanLabel);
+      SetNoSanitizeMetadata(ToStore);
+    }
 
     // Store the updated coverage back to the map so AFL++ sees it.
-    StoreInst *StoreCtx = IRB.CreateStore(Incr, MapPtrIdx);
+    StoreInst *StoreCtx = IRB.CreateStore(ToStore, MapPtrIdx);
     SetNoSanitizeMetadata(StoreCtx);
   }
 };
