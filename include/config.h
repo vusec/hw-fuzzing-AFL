@@ -153,9 +153,9 @@
 /* Number of calibration cycles per every new test case (and for test
    cases that show variable behavior): */
 
-#define CAL_CYCLES_FAST 3U
+#define CAL_CYCLES_FAST 1U
 #define CAL_CYCLES 1U
-#define CAL_CYCLES_LONG 12U
+#define CAL_CYCLES_LONG 1U
 
 /* Number of subsequent timeouts before abandoning an input file: */
 
