@@ -154,7 +154,7 @@
    cases that show variable behavior): */
 
 #define CAL_CYCLES_FAST 3U
-#define CAL_CYCLES 7U
+#define CAL_CYCLES 1U
 #define CAL_CYCLES_LONG 12U
 
 /* Number of subsequent timeouts before abandoning an input file: */
