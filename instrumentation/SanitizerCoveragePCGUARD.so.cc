@@ -1074,7 +1074,8 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
 
       SelectInst *selectInst = nullptr;
 
-      if (!skip_next && (selectInst = dyn_cast<SelectInst>(&IN))) {
+      if (!skip_next && (selectInst = dyn_cast<SelectInst>(&IN))
+          && std::getenv("HWFUZZ_NO_SELECT") == nullptr) {
 
         uint32_t    vector_cnt = 0;
         Value      *condition = selectInst->getCondition();
