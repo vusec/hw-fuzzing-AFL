@@ -919,7 +919,7 @@ void ModuleSanitizerCoverageAFL::CreateFunctionLocalArrays(
 }
 
 bool ModuleSanitizerCoverageAFL::InjectCoverage(
-    Function &F, ArrayRef<BasicBlock *> AllBlocksRaw, bool IsLeafFunc) {
+    Function &F, ArrayRef<BasicBlock *> AllBlocksDummy, bool IsLeafFunc) {
   std::vector<BasicBlock *> AllBlocks;
 
   // How many instructions provide additional feedback based on taint.
@@ -951,7 +951,11 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
       // We can' do this here as we iterate over a list of instructions. I don't
       // know how the rest of this code works, but I also don't have brain worms.
       if (providesFeedback(IN)) {
-        auto map_offset = toInstrumentForDFSan.size() * 4;
+        auto map_offset = AllBlocks.size() + toInstrumentForDFSan.size();
+        map_offset *= 4;
+
+        // Update total map size;
+        instr += 1;
         toInstrumentForDFSan.push_back({map_offset, &IN});
         continue;
       }
