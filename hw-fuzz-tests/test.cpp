@@ -3,9 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 
-#include <sanitizer/dfsan_interface.h>
-
-dfsan_label label = 1;
+#include <tainting.h>
 
 const size_t size = 20;
 
@@ -35,7 +33,7 @@ void target_function(char *buf, size_t len) {
 
   Step step1('1');
 
-  dfsan_set_label(label, (void*)(step1.storage + 4), 1);
+  Tainting::taintPtr((void*)(step1.storage + 4), 1);
 
   Step step2('2');
   step2.set(5, step1.getCharOrNull(*(++buf)));
@@ -49,7 +47,7 @@ void target_function(char *buf, size_t len) {
   Step step5('5');
   step5.set(3, step4.getCharOrNull(*(++buf)));
 
-  if (dfsan_get_label(step5.storage[3]) == label) {
+  if (Tainting::check(step5.storage + 3, 1)) {
     fprintf(stderr, "Got magic input\n");
     abort();
   }

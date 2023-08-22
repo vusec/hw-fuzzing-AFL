@@ -19,10 +19,10 @@ del os.environ[disable_env_var]
 
 os.environ["PATH"] = path.join(script_dir, "..") + ":" + os.environ["PATH"]
 
-call("afl-clang-fast++ -fsanitize-ignorelist=ignore_list -fsanitize=dataflow -o target_taint test.cpp")
+call("afl-clang-fast++ -fsanitize-ignorelist=ignore_list -I ../../llvm/compiler-rt/include/ -fsanitize=memory -o target_taint test.cpp")
 
 os.environ[disable_env_var] = "1"
-call("afl-clang-fast++ -fsanitize-ignorelist=ignore_list -fsanitize=dataflow -o target_no_taint test.cpp")
+call("afl-clang-fast++ -fsanitize-ignorelist=ignore_list -I ../../llvm/compiler-rt/include/ -fsanitize=memory -o target_no_taint test.cpp")
 
 os.environ["AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES"] = "1"
 os.environ["AFL_BENCH_UNTIL_CRASH"] = "1"
