@@ -304,22 +304,18 @@ class ModuleSanitizerCoverageAFL
     if (condition->getType()->isIntegerTy()) {
       Value *condition_coverage = IRB.CreateZExtOrTrunc(condition, Int8Ty);
       SetNoSanitizeMetadata(condition_coverage);
+
       // Add the label to the coverage map.
       addToCoverageMap(IRB, map_offset, condition_coverage);
       return;
     }
+
     FixedVectorType *t = cast<FixedVectorType>(condition->getType());
-    Value *merged_condition = nullptr;
     for (unsigned i = 0; i < t->getNumElements(); ++i) {
       Value *condition_bit = IRB.CreateExtractElement(condition, i);
       SetNoSanitizeMetadata(condition_bit);
-      if (merged_condition != nullptr)
-        merged_condition = IRB.CreateOr(condition_bit, merged_condition);
-      else
-        merged_condition = condition_bit;
+      addToCoverageMap(IRB, map_offset + i, condition_bit);
     }
-    SetNoSanitizeMetadata(merged_condition);
-    addToCoverageMap(IRB, map_offset, merged_condition);
   }
 
   void doTaintFeedback(llvm::Instruction &i, unsigned long map_offset) {
@@ -975,14 +971,35 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
     unsigned long mapPos = 0;
     Instruction *toInstrumentForDFSan = nullptr;
     SelectInst *selectInst = nullptr;
+    unsigned requiredMapElements() const {
+      if (toInstrumentForDFSan)
+        return 1;
+      if (selectInst) {
+        Type *conditionT = selectInst->getCondition()->getType();
+        if (conditionT->isIntegerTy())
+          return 1;
+        return cast<FixedVectorType>(conditionT)->getNumElements();
+      }
+      llvm::errs() << "Neither a DFSan nor select instrumentation?\n";
+      abort();
+    }
   };
   std::vector<DelayedInstrumentation> toInstrument;
+  unsigned map_offset = AllBlocks.size();
+  auto queueInstrumentation = [&](DelayedInstrumentation d){
+    // Mark which part of the map to use for this instrumentation.
+    d.mapPos = map_offset;
+
+    // Find the next free offset in the map we should use.
+    map_offset += d.requiredMapElements();
+
+    // Schedule for instrumentation after we're done iterating the IR.
+    toInstrument.push_back(d);
+  };
 
   for (auto &BB : F) {
     for (auto &I : BB) {
       auto map_offset = AllBlocks.size() + toInstrument.size();
-      DelayedInstrumentation delayed;
-      delayed.mapPos = map_offset;
 
       // Don't touch sanitizer instrumentation.
       if (I.hasMetadata(I.getModule()->getMDKindID("nosanitize")))
@@ -991,12 +1008,14 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
       // Queue to be instrumented for DFSan/select instrumentation.
       // We can' do this here as we iterate over a list of instructions.
       if (providesFeedback(I)) {
-        delayed.toInstrumentForDFSan = &I;
-        toInstrument.push_back(delayed);
+        DelayedInstrumentation instrumentation;
+        instrumentation.toInstrumentForDFSan = &I;
+        queueInstrumentation(instrumentation);
       }
       if (SelectInst *S = dyn_cast<SelectInst>(&I)) {
-        delayed.selectInst = S;
-        toInstrument.push_back(delayed);
+        DelayedInstrumentation instrumentation;
+        instrumentation.selectInst = S;
+        queueInstrumentation(instrumentation);
       }
     }
   }
@@ -1012,7 +1031,7 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
     if (target.selectInst)
       doSelectFeedback(*target.selectInst, target.mapPos);
   }
-  
+
   unsigned block_index = 0;
   for (auto &BB : AllBlocks)
     InjectCoverageAtBlock(F, *BB, block_index++, IsLeafFunc);

@@ -44,6 +44,14 @@ void target_function(char *buf, size_t len) {
   Step step4('4');
   step4.set(11, step3.getCharOrNull(*(++buf)));
 
+  if (step1.storage[0] == 'x') {
+    printf("got an x first\n");
+  }
+
+  if (step1.storage[0] == 'x') {
+    printf("second one is %d\n", (step1.storage[1] == 'y' ? 1 : 2));
+  }
+
   Step step5('5');
   step5.set(3, step4.getCharOrNull(*(++buf)));
 
