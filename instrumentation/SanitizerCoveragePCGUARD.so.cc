@@ -962,7 +962,7 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
     Function &F, ArrayRef<BasicBlock *> AllBlocksDummy, bool IsLeafFunc) {
   std::vector<BasicBlock *> AllBlocks;
 
-  if (std::getenv("HWFUZZ_NO_BLOCKS") == nullptr) {
+  if (std::getenv("HWFUZZ_BLOCKS")) {
     for (auto &BB : F)
       AllBlocks.push_back(&BB);
   }
