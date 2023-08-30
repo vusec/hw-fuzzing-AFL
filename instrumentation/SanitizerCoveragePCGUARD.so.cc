@@ -1012,10 +1012,12 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
         instrumentation.toInstrumentForDFSan = &I;
         queueInstrumentation(instrumentation);
       }
-      if (SelectInst *S = dyn_cast<SelectInst>(&I)) {
-        DelayedInstrumentation instrumentation;
-        instrumentation.selectInst = S;
-        queueInstrumentation(instrumentation);
+      if (std::getenv("HWFUZZ_BLOCKS")) {
+        if (SelectInst *S = dyn_cast<SelectInst>(&I)) {
+          DelayedInstrumentation instrumentation;
+          instrumentation.selectInst = S;
+          queueInstrumentation(instrumentation);
+        }
       }
     }
   }
