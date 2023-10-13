@@ -697,11 +697,14 @@ void ModuleSanitizerCoverageAFL::instrumentFunction(
   }
 
   InjectCoverage(F, BlocksToInstrument, IsLeafFunc);
-  InjectCoverageForIndirectCalls(F, IndirCalls);
-  InjectTraceForCmp(F, CmpTraceTargets);
-  InjectTraceForSwitch(F, SwitchTraceTargets);
-  InjectTraceForDiv(F, DivTraceTargets);
-  InjectTraceForGep(F, GepTraceTargets);
+  // None of these are relevant for our hw fuzzing setup.
+  if (false) {
+    InjectCoverageForIndirectCalls(F, IndirCalls);
+    InjectTraceForCmp(F, CmpTraceTargets);
+    InjectTraceForSwitch(F, SwitchTraceTargets);
+    InjectTraceForDiv(F, DivTraceTargets);
+    InjectTraceForGep(F, GepTraceTargets);
+  }
 
 }
 
