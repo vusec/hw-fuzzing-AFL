@@ -240,7 +240,9 @@ class ModuleSanitizerCoverageAFL
 
   void addToCoverageMap(IRBuilder<> &IRB, 
                         unsigned long map_offset, Value *coverage) {
-    // Offsets are indizes into an array of integers.
+    Type *coverage_ptr_type = PointerType::get(coverage->getType(), 0);
+
+    // Offsets are indizes into an array of 32 bit integers.
     map_offset *= sizeof(unsigned int);
     Type *coverage_map_type = Int8Ty;
 
@@ -248,9 +250,9 @@ class ModuleSanitizerCoverageAFL
       llvm::errs() << "coverage is a nullptr?\n";
       abort();
     }
-    if (coverage->getType() != coverage_map_type) {
-      coverage = IRB.CreateZExtOrTrunc(coverage, coverage_map_type,
-                                       "casted_cov");
+    if (!coverage->getType()->isIntegerTy()) {
+      llvm::errs() << "coverage is not an int?\n";
+      abort();
     }
 
     // Now load the AFL++ coverage map.
@@ -276,7 +278,11 @@ class ModuleSanitizerCoverageAFL
     Value* MapPtrIdx = IRB.CreateGEP(coverage_map_type, MapPtr, CurLoc);
     SetNoSanitizeMetadata(MapPtrIdx);
 
-    LoadInst *Counter = IRB.CreateLoad(coverage_map_type, MapPtrIdx, "old_cov");
+    Value *TypedMapPtrIdx =
+        IRB.CreateBitOrPointerCast(MapPtrIdx, coverage_ptr_type);
+
+    LoadInst *Counter =
+        IRB.CreateLoad(coverage->getType(), TypedMapPtrIdx, "old_cov");
     SetNoSanitizeMetadata(Counter);
     Value *ToStore = nullptr;
 
@@ -293,7 +299,7 @@ class ModuleSanitizerCoverageAFL
     }
 
     // Store the updated coverage back to the map so AFL++ sees it.
-    StoreInst *StoreCtx = IRB.CreateStore(ToStore, MapPtrIdx, "store_cov");
+    StoreInst *StoreCtx = IRB.CreateStore(ToStore, TypedMapPtrIdx, "store_cov");
     SetNoSanitizeMetadata(StoreCtx);
   }
 
@@ -318,6 +324,34 @@ class ModuleSanitizerCoverageAFL
     }
   }
 
+  static unsigned getBytesForType(llvm::Type *type) {
+    unsigned bytes = type->getScalarSizeInBits() / 8U;
+    if (bytes == 0) return 1;
+    return bytes;
+  }
+
+  static unsigned getBytesForDFSanMemoryOpImpl(llvm::Instruction &i) {
+    // Without MSan active, we just need 1 byte for the dfsan label.
+    llvm::Function *func = i.getParent()->getParent();
+    if (!func->hasFnAttribute(Attribute::SanitizeMemory)) return 1;
+
+    if (auto *load = dyn_cast<LoadInst>(&i))
+      return getBytesForType(load->getType());
+
+    if (auto *store = dyn_cast<StoreInst>(&i))
+      return getBytesForType(store->getValueOperand()->getType());
+
+    llvm::errs() << "bits requested for bogus instruction? " << i;
+    std::abort();
+  }
+
+  static unsigned getBytesForDFSanMemoryOp(llvm::Instruction &i) {
+    unsigned bytes = getBytesForDFSanMemoryOpImpl(i);
+    if (std::getenv("HWFUZZ_PRINT_SIZES"))
+      llvm::errs() << "COVERAGE: Using " << bytes << "B for " << i << "\n";
+    return bytes;
+  }
+
   void doTaintFeedback(llvm::Instruction &i, unsigned long map_offset) {
     if (!providesFeedback(i)) {
       llvm::errs() << "Called on bogus non-taint instruction? " << i;
@@ -328,11 +362,11 @@ class ModuleSanitizerCoverageAFL
     // For load/stores it's just the pointer where the value is stored/loaded
     // from/to.
     Value *ptr = nullptr;
-    if (auto *load = dyn_cast<LoadInst>(&i))
+    if (auto *load = dyn_cast<LoadInst>(&i)) {
       ptr = load->getPointerOperand();
-    else if (auto *store = dyn_cast<StoreInst>(&i))
+    } else if (auto *store = dyn_cast<StoreInst>(&i)) {
       ptr = store->getPointerOperand();
-    else {
+    } else {
       llvm::errs() << "Called on bogus instruction? " << i;
       std::abort();
     }
@@ -348,18 +382,24 @@ class ModuleSanitizerCoverageAFL
     // Calculate the shadow address of the loaded/store pointer.
     Value *OffsetLong = IRB.CreatePointerCast(ptr, IntptrTy);
     SetNoSanitizeMetadata(OffsetLong);
+
     // The XOR mask that maps memory to shadow memory in DFSan/MSan.
     const uint64_t XorMask = 0x500000000000;
+
     // Map the address we're inspecting to the shadow memory.
     Value *shadowAddr = IRB.CreateXor(OffsetLong, ConstantInt::get(IntptrTy, XorMask));
     SetNoSanitizeMetadata(shadowAddr);
 
+    Type *shadowType =
+        IntegerType::get(i.getContext(), 8 * getBytesForDFSanMemoryOp(i));
+
     // Cast the shadow address to a proper pointer.
-    Value *shadowPtr = IRB.CreateIntToPtr(shadowAddr, Int8PtrTy);
+    Value *shadowPtr =
+        IRB.CreateIntToPtr(shadowAddr, PointerType::get(i.getContext(), 0));
     SetNoSanitizeMetadata(shadowPtr);
 
     // Load the shadow value that has the label.
-    LoadInst *dfsanLabel = IRB.CreateLoad(Int8Ty, shadowPtr);
+    LoadInst *dfsanLabel = IRB.CreateLoad(shadowType, shadowPtr);
     SetNoSanitizeMetadata(dfsanLabel);
 
     // Add the label to the coverage map.
@@ -970,10 +1010,30 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
   struct DelayedInstrumentation {
     unsigned long mapPos = 0;
     Instruction *toInstrumentForDFSan = nullptr;
-    SelectInst *selectInst = nullptr;
+    SelectInst   *selectInst = nullptr;
+
+    Type *loadedType() const {
+      if (LoadInst *l = dyn_cast<LoadInst>(toInstrumentForDFSan))
+        return l->getType();
+      if (StoreInst *l = dyn_cast<StoreInst>(toInstrumentForDFSan))
+        return l->getValueOperand()->getType();
+      return nullptr;
+    }
+
     unsigned requiredMapElements() const {
-      if (toInstrumentForDFSan)
-        return 1;
+      if (toInstrumentForDFSan) {
+        // Every PCGUARD slot can store 4 bytes, so we need to calculate the
+        // number of taint bits and then return the number of slots we need.
+        const unsigned bytes = getBytesForDFSanMemoryOp(*toInstrumentForDFSan);
+        const unsigned slots = bytes / 4U;
+        // We need always at least one slot to store some feedback.
+        if (slots == 0) return 1;
+        if (slots > 4) {
+          llvm::errs() << "Too many slots. Size calculation wrong?\n";
+          abort();
+        }
+        return slots;
+      }
       if (selectInst) {
         Type *conditionT = selectInst->getCondition()->getType();
         if (conditionT->isIntegerTy())
