@@ -94,7 +94,21 @@ static const char *use_threadsafe_counters;
 namespace {
 
 static bool isInPhantomTrailsBaseline() {
-  return std::getenv("HWFUZZ_BASELINE") != nullptr;
+  std::string envVarName = "HWFUZZ_BASELINE";
+  const char *baseline_string = std::getenv(envVarName.c_str());
+  if (baseline_string == nullptr) {
+    llvm::errs() << envVarName << " is not set! Set env var to YES or NO\n";
+    abort();
+  }
+  std::string value = baseline_string;
+  if (value == "YES")
+    return true;
+  if (value == "NO")
+    return false;
+
+  llvm::errs() << envVarName << " is not set to YES or NO, but '"
+                << value << "'.\n";
+  abort();
 }
 
 SanitizerCoverageOptions OverrideFromCL(SanitizerCoverageOptions Options) {
