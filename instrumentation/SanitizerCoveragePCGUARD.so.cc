@@ -93,6 +93,10 @@ static const char *use_threadsafe_counters;
 
 namespace {
 
+static bool isInPhantomTrailsBaseline() {
+  return std::getenv("HWFUZZ_BASELINE") != nullptr;
+}
+
 SanitizerCoverageOptions OverrideFromCL(SanitizerCoverageOptions Options) {
 
   // Sets CoverageType and IndirectCalls.
@@ -238,8 +242,14 @@ class ModuleSanitizerCoverageAFL
     return false;
   }
 
+  enum class MergeTaint {
+    Or,
+    Add
+  };
+
   void addToCoverageMap(IRBuilder<> &IRB, 
-                        unsigned long map_offset, Value *coverage) {
+                        unsigned long map_offset, Value *coverage,
+                        MergeTaint merge_mode) {
     Type *coverage_ptr_type = PointerType::get(coverage->getType(), 0);
 
     // Offsets are indizes into an array of 32 bit integers.
@@ -286,12 +296,13 @@ class ModuleSanitizerCoverageAFL
     SetNoSanitizeMetadata(Counter);
     Value *ToStore = nullptr;
 
-    if (getenv("HWFUZZ_COUNT_TAINT") != nullptr) {
+    if (merge_mode == MergeTaint::Add) {
       // Add the current label value to the counter. Untainted is label 0, so
       // this means that for tainted memory this increases coverage.
       ToStore = IRB.CreateAdd(Counter, coverage, "new_cov");
       SetNoSanitizeMetadata(ToStore);
     } else {
+      assert(merge_mode == MergeTaint::Or);
       // Just or-in the label which is either 0 (no coverage and no taint)
       // or non-zero (coverage and taint).
       ToStore = IRB.CreateOr(Counter, coverage, "new_cov");
@@ -312,7 +323,7 @@ class ModuleSanitizerCoverageAFL
       SetNoSanitizeMetadata(condition_coverage);
 
       // Add the label to the coverage map.
-      addToCoverageMap(IRB, map_offset, condition_coverage);
+      addToCoverageMap(IRB, map_offset, condition_coverage, MergeTaint::Or);
       return;
     }
 
@@ -320,7 +331,7 @@ class ModuleSanitizerCoverageAFL
     for (unsigned i = 0; i < t->getNumElements(); ++i) {
       Value *condition_bit = IRB.CreateExtractElement(condition, i);
       SetNoSanitizeMetadata(condition_bit);
-      addToCoverageMap(IRB, map_offset + i, condition_bit);
+      addToCoverageMap(IRB, map_offset + i, condition_bit, MergeTaint::Or);
     }
   }
 
@@ -391,7 +402,8 @@ class ModuleSanitizerCoverageAFL
     SetNoSanitizeMetadata(shadowAddr);
 
     Type *shadowType =
-        IntegerType::get(i.getContext(), 8 * getBytesForDFSanMemoryOp(i));
+        IntegerType::get(i.getContext(),
+        /*bytes to bits*/8 * getBytesForDFSanMemoryOp(i));
 
     // Cast the shadow address to a proper pointer.
     Value *shadowPtr =
@@ -403,7 +415,77 @@ class ModuleSanitizerCoverageAFL
     SetNoSanitizeMetadata(dfsanLabel);
 
     // Add the label to the coverage map.
-    addToCoverageMap(IRB, map_offset, dfsanLabel);
+    addToCoverageMap(IRB, map_offset, dfsanLabel, MergeTaint::Or);
+  }
+
+  // Toggle feedback implementation.
+
+  static bool canDoToggleFeedback(llvm::StoreInst &i) {
+    return i.getValueOperand()->getType()->isIntegerTy();
+  }
+
+  static unsigned getBytesForToggleOp(llvm::Instruction &i) {
+    if (auto *load = dyn_cast<LoadInst>(&i))
+      return getBytesForType(load->getType());
+
+    if (auto *store = dyn_cast<StoreInst>(&i))
+      return getBytesForType(store->getValueOperand()->getType());
+
+    llvm::errs() << "bits requested for bogus instruction? " << i;
+    std::abort();
+  }
+
+  static unsigned getSlotsForToggleOp(StoreInst &toggleStore) {
+    const unsigned PCGuardSlotSize = 4U;
+    // Every PCGUARD slot can store 4 bytes, so we need to calculate the
+    // number of toggle bits and then return the number of slots we need.
+    // Each toggle bit counts for going from 0 to 1 and vice versa, so we
+    // twice as many feedback slots.
+    const unsigned bytes = getBytesForToggleOp(toggleStore);
+    const unsigned slots = (bytes * 2U)/ PCGuardSlotSize;
+    // We need always at least one slot to store some feedback.
+    if (slots == 0) return 1;
+    if (slots > 8) {
+      llvm::errs() << "Too many toggle slots. Size calculation wrong?\n";
+      abort();
+    }
+    return slots;
+  }
+
+  // Adds toggle feedback.
+  void doToggleFeedback(llvm::StoreInst &i, unsigned long map_offset) {
+    // Find the pointer that we want to check the taint value for.
+    // For load/stores it's just the pointer where the value is stored/loaded
+    // from/to.
+    Value *ptr = i.getPointerOperand();
+    if (!canDoToggleFeedback(i))  {
+      llvm::errs() << "Bogus toggle feedback inst?" << i;
+      std::abort();
+    }
+
+    // Add toggle information for the load/store.
+    IRBuilder<> IRB(&i);
+
+    Value *old_value = i.getValueOperand();
+    // Load the shadow value that has the label.
+    LoadInst *new_value = IRB.CreateLoad(old_value->getType(), ptr);
+    SetNoSanitizeMetadata(new_value);
+
+    Value *is_different = IRB.CreateXor(new_value, old_value);
+    SetNoSanitizeMetadata(is_different);
+
+    // Toggle to 1 if old/new bits are different and new value is 1.
+    Value *toggle_to_1 = IRB.CreateAnd(new_value, is_different);
+    SetNoSanitizeMetadata(toggle_to_1);
+
+    // Toggle to 0 if old/new bits are different and old value is 1.
+    Value *toggle_to_0 = IRB.CreateAnd(old_value, is_different);
+    SetNoSanitizeMetadata(toggle_to_0);
+
+    // Add the toggle information to the coverage map.
+    addToCoverageMap(IRB, map_offset, toggle_to_0, MergeTaint::Or);
+    addToCoverageMap(IRB, map_offset + getSlotsForToggleOp(i),
+                     toggle_to_1, MergeTaint::Or);
   }
 };
 
@@ -1002,7 +1084,7 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
     Function &F, ArrayRef<BasicBlock *> AllBlocksDummy, bool IsLeafFunc) {
   std::vector<BasicBlock *> AllBlocks;
 
-  if (std::getenv("HWFUZZ_BLOCKS")) {
+  if (isInPhantomTrailsBaseline()) {
     for (auto &BB : F)
       AllBlocks.push_back(&BB);
   }
@@ -1010,26 +1092,20 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
   struct DelayedInstrumentation {
     unsigned long mapPos = 0;
     Instruction *toInstrumentForDFSan = nullptr;
-    SelectInst   *selectInst = nullptr;
-
-    Type *loadedType() const {
-      if (LoadInst *l = dyn_cast<LoadInst>(toInstrumentForDFSan))
-        return l->getType();
-      if (StoreInst *l = dyn_cast<StoreInst>(toInstrumentForDFSan))
-        return l->getValueOperand()->getType();
-      return nullptr;
-    }
+    SelectInst  *selectInst = nullptr;
+    StoreInst   *toggleStore = nullptr;
 
     unsigned requiredMapElements() const {
+      const unsigned PCGuardSlotSize = 4U;
       if (toInstrumentForDFSan) {
         // Every PCGUARD slot can store 4 bytes, so we need to calculate the
         // number of taint bits and then return the number of slots we need.
         const unsigned bytes = getBytesForDFSanMemoryOp(*toInstrumentForDFSan);
-        const unsigned slots = bytes / 4U;
+        const unsigned slots = bytes / PCGuardSlotSize;
         // We need always at least one slot to store some feedback.
         if (slots == 0) return 1;
         if (slots > 4) {
-          llvm::errs() << "Too many slots. Size calculation wrong?\n";
+          llvm::errs() << "Too many dfsan slots. Size calculation wrong?\n";
           abort();
         }
         return slots;
@@ -1040,7 +1116,9 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
           return 1;
         return cast<FixedVectorType>(conditionT)->getNumElements();
       }
-      llvm::errs() << "Neither a DFSan nor select instrumentation?\n";
+      if (toggleStore)
+        return getSlotsForToggleOp(*toggleStore);
+      llvm::errs() << "Neither a DFSan, toggle nor select instrumentation?\n";
       abort();
     }
   };
@@ -1067,16 +1145,23 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
 
       // Queue to be instrumented for DFSan/select instrumentation.
       // We can' do this here as we iterate over a list of instructions.
-      if (providesFeedback(I)) {
+      if (!isInPhantomTrailsBaseline() && providesFeedback(I)) {
         DelayedInstrumentation instrumentation;
         instrumentation.toInstrumentForDFSan = &I;
         queueInstrumentation(instrumentation);
       }
-      if (std::getenv("HWFUZZ_BLOCKS")) {
+      if (isInPhantomTrailsBaseline()) {
         if (SelectInst *S = dyn_cast<SelectInst>(&I)) {
           DelayedInstrumentation instrumentation;
           instrumentation.selectInst = S;
           queueInstrumentation(instrumentation);
+        }
+        if (StoreInst *S = dyn_cast<StoreInst>(&I)) {
+          if (S->getValueOperand()->getType()->isIntegerTy()) {
+            DelayedInstrumentation instrumentation;
+            instrumentation.toggleStore = S;
+            queueInstrumentation(instrumentation);
+          }
         }
       }
     }
@@ -1090,6 +1175,8 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
   for (const auto &target : toInstrument) {
     if (target.toInstrumentForDFSan)
       doTaintFeedback(*target.toInstrumentForDFSan, target.mapPos);
+    if (target.toggleStore)
+      doToggleFeedback(*target.toggleStore, target.mapPos);
     if (target.selectInst)
       doSelectFeedback(*target.selectInst, target.mapPos);
   }
