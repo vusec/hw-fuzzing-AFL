@@ -93,22 +93,60 @@ static const char *use_threadsafe_counters;
 
 namespace {
 
-static bool isInPhantomTrailsBaseline() {
+enum class CoverageMode {
+  Toggle,
+  Edge,
+  Taint
+};
+
+// C++ still has no string splittting...
+static std::vector<std::string> split(std::string s, std::string delimiter) {
+    size_t pos_start = 0, pos_end, delim_len = delimiter.length();
+    std::string token;
+    std::vector<std::string> res;
+
+    while ((pos_end = s.find(delimiter, pos_start)) != std::string::npos) {
+        token = s.substr (pos_start, pos_end - pos_start);
+        pos_start = pos_end + delim_len;
+        res.push_back (token);
+    }
+
+    res.push_back (s.substr (pos_start));
+    return res;
+}
+
+static bool isModeOn(CoverageMode mode) {
   std::string envVarName = "HWFUZZ_BASELINE";
   const char *baseline_string = std::getenv(envVarName.c_str());
   if (baseline_string == nullptr) {
-    llvm::errs() << envVarName << " is not set! Set env var to YES or NO\n";
+    llvm::errs() << envVarName << " is not set!O\n";
     abort();
   }
-  std::string value = baseline_string;
-  if (value == "YES")
-    return true;
-  if (value == "NO")
-    return false;
+  // Map from env var parts to specific modes.
+  const std::map<std::string, CoverageMode> modeMap = {
+    {"Toggle", CoverageMode::Toggle},
+    {"Edge", CoverageMode::Edge},
+    {"Taint", CoverageMode::Taint},
+  };
 
-  llvm::errs() << envVarName << " is not set to YES or NO, but '"
-                << value << "'.\n";
-  abort();
+  // Split the env var value into different modes.
+  std::string value = baseline_string;
+  std::vector<std::string> valueParts = split(value, ",");
+  std::set<CoverageMode> enabledModes;
+
+  // Map each mode string to an enum value.
+  for (const std::string &modeStr : valueParts) {
+    if (modeMap.count(modeStr) == 0) {
+      llvm::errs() << modeStr << " is not valid mode string!\n";
+      llvm::errs() << "Valid values are:\n";
+      for (auto &pair : modeMap)
+        llvm::errs() << " * " << pair.first << "\n";
+      abort();
+    }
+    enabledModes.insert(modeMap.at(modeStr));
+  }
+
+  return enabledModes.count(mode) != 0;
 }
 
 SanitizerCoverageOptions OverrideFromCL(SanitizerCoverageOptions Options) {
@@ -1098,7 +1136,7 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
     Function &F, ArrayRef<BasicBlock *> AllBlocksDummy, bool IsLeafFunc) {
   std::vector<BasicBlock *> AllBlocks;
 
-  if (isInPhantomTrailsBaseline()) {
+  if (isModeOn(CoverageMode::Edge)) {
     for (auto &BB : F)
       AllBlocks.push_back(&BB);
   }
@@ -1151,25 +1189,26 @@ bool ModuleSanitizerCoverageAFL::InjectCoverage(
 
   for (auto &BB : F) {
     for (auto &I : BB) {
-      auto map_offset = AllBlocks.size() + toInstrument.size();
-
       // Don't touch sanitizer instrumentation.
       if (I.hasMetadata(I.getModule()->getMDKindID("nosanitize")))
         continue;
 
       // Queue to be instrumented for DFSan/select instrumentation.
       // We can' do this here as we iterate over a list of instructions.
-      if (!isInPhantomTrailsBaseline() && providesFeedback(I)) {
+      if (isModeOn(CoverageMode::Taint) && providesFeedback(I)) {
         DelayedInstrumentation instrumentation;
         instrumentation.toInstrumentForDFSan = &I;
         queueInstrumentation(instrumentation);
       }
-      if (isInPhantomTrailsBaseline()) {
+      // Select instructions behave like coverage blocks.
+      if (isModeOn(CoverageMode::Edge)) {
         if (SelectInst *S = dyn_cast<SelectInst>(&I)) {
           DelayedInstrumentation instrumentation;
           instrumentation.selectInst = S;
           queueInstrumentation(instrumentation);
         }
+      }
+      if (isModeOn(CoverageMode::Toggle)) {
         if (StoreInst *S = dyn_cast<StoreInst>(&I)) {
           if (S->getValueOperand()->getType()->isIntegerTy()) {
             DelayedInstrumentation instrumentation;
