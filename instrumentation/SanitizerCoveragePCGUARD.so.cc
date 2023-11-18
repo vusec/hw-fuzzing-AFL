@@ -116,7 +116,7 @@ static std::vector<std::string> split(std::string s, std::string delimiter) {
 }
 
 static bool isModeOn(CoverageMode mode) {
-  std::string envVarName = "HWFUZZ_BASELINE";
+  std::string envVarName = "HWFUZZ_COVERAGE";
   const char *baseline_string = std::getenv(envVarName.c_str());
   if (baseline_string == nullptr) {
     llvm::errs() << envVarName << " is not set!O\n";
