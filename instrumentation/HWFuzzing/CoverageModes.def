@@ -1,4 +1,13 @@
+// Adds coverage data that checks every store whether it toggled data from
+// 0 to 1 or vice versa.
 COVERAGE_MODE(Toggle)
+// Instruments edges in the CFG as coverage points.
 COVERAGE_MODE(Edge)
+// Instruments stores and checks if they store tainted data.
 COVERAGE_MODE(Taint)
+// These two special modes disable one random half of the instrumentation.
+// That is, for each instrumentation/coverage point, they randomly decide
+// to disable it.
+COVERAGE_MODE(Half1)
+COVERAGE_MODE(Half2)
 #undef COVERAGE_MODE

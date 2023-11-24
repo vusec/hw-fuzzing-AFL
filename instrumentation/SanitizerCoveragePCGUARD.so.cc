@@ -50,6 +50,8 @@
 #include "debug.h"
 #include "afl-llvm-common.h"
 
+#include "HWFuzzing/CoverageMode.h"
+
 using namespace llvm;
 
 #define DEBUG_TYPE "sancov"
@@ -92,60 +94,6 @@ static const char *skip_nozero;
 static const char *use_threadsafe_counters;
 
 namespace {
-
-enum class CoverageMode {
-#define COVERAGE_MODE(VAL) VAL,
-#include "HWFuzzing/CoverageModes.def"
-};
-
-// C++ still has no string splittting...
-static std::vector<std::string> split(std::string s, std::string delimiter) {
-    size_t pos_start = 0, pos_end, delim_len = delimiter.length();
-    std::string token;
-    std::vector<std::string> res;
-
-    while ((pos_end = s.find(delimiter, pos_start)) != std::string::npos) {
-        token = s.substr (pos_start, pos_end - pos_start);
-        pos_start = pos_end + delim_len;
-        res.push_back (token);
-    }
-
-    res.push_back (s.substr (pos_start));
-    return res;
-}
-
-static bool isModeOn(CoverageMode mode) {
-  std::string envVarName = "HWFUZZ_COVERAGE";
-  const char *baseline_string = std::getenv(envVarName.c_str());
-  if (baseline_string == nullptr) {
-    llvm::errs() << envVarName << " is not set!O\n";
-    abort();
-  }
-  // Map from env var parts to specific modes.
-  const std::map<std::string, CoverageMode> modeMap = {
-#define COVERAGE_MODE(VAL) {#VAL, CoverageMode:: VAL },
-#include "HWFuzzing/CoverageModes.def"
-  };
-
-  // Split the env var value into different modes.
-  std::string value = baseline_string;
-  std::vector<std::string> valueParts = split(value, ",");
-  std::set<CoverageMode> enabledModes;
-
-  // Map each mode string to an enum value.
-  for (const std::string &modeStr : valueParts) {
-    if (modeMap.count(modeStr) == 0) {
-      llvm::errs() << modeStr << " is not valid mode string!\n";
-      llvm::errs() << "Valid values are:\n";
-      for (auto &pair : modeMap)
-        llvm::errs() << " * " << pair.first << "\n";
-      abort();
-    }
-    enabledModes.insert(modeMap.at(modeStr));
-  }
-
-  return enabledModes.count(mode) != 0;
-}
 
 SanitizerCoverageOptions OverrideFromCL(SanitizerCoverageOptions Options) {
 
