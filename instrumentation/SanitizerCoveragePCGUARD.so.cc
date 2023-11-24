@@ -94,9 +94,8 @@ static const char *use_threadsafe_counters;
 namespace {
 
 enum class CoverageMode {
-  Toggle,
-  Edge,
-  Taint
+#define COVERAGE_MODE(VAL) VAL,
+#include "HWFuzzing/CoverageModes.def"
 };
 
 // C++ still has no string splittting...
@@ -124,9 +123,8 @@ static bool isModeOn(CoverageMode mode) {
   }
   // Map from env var parts to specific modes.
   const std::map<std::string, CoverageMode> modeMap = {
-    {"Toggle", CoverageMode::Toggle},
-    {"Edge", CoverageMode::Edge},
-    {"Taint", CoverageMode::Taint},
+#define COVERAGE_MODE(VAL) {#VAL, CoverageMode:: COVERAGE_MODE },
+#include "HWFuzzing/CoverageModes.def"
   };
 
   // Split the env var value into different modes.
