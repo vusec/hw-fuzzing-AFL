@@ -123,7 +123,7 @@ static bool isModeOn(CoverageMode mode) {
   }
   // Map from env var parts to specific modes.
   const std::map<std::string, CoverageMode> modeMap = {
-#define COVERAGE_MODE(VAL) {#VAL, CoverageMode:: COVERAGE_MODE },
+#define COVERAGE_MODE(VAL) {#VAL, CoverageMode:: VAL },
 #include "HWFuzzing/CoverageModes.def"
   };
 
