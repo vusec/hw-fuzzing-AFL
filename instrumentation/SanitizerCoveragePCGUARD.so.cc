@@ -51,6 +51,7 @@
 #include "afl-llvm-common.h"
 
 #include "HWFuzzing/CoverageMode.h"
+#include "HWFuzzing/Instrumentation.h"
 
 using namespace llvm;
 
@@ -215,276 +216,7 @@ class ModuleSanitizerCoverageAFL
   ConstantInt    *One = NULL;
   ConstantInt    *Zero = NULL;
 
-  // DFSan stuff
-  bool providesFeedback(const Instruction &inst) {
-    // Do not touch code injected by AFL++ itself (which has nosanitize MD).
-    // This code never has meaningful taint and just loads AFL++ stuff like
-    // the coverage map.
-    if (inst.hasMetadata(inst.getModule()->getMDKindID("nosanitize")))
-      return false;
-
-    // Disable all instrumentation if HWFUZZ_NO_DFSAN is set.
-    if (getenv("HWFUZZ_NO_DFSAN"))
-      return false;
-
-    // Optionally mark loads as providing feedback on taint.
-    if (getenv("HWFUZZ_NO_LOAD") == nullptr)
-      if (isa<LoadInst>(inst))
-        return true;
-
-    // Optionally mark stores as providing feedback on taint.
-    if (getenv("HWFUZZ_NO_STORE") == nullptr)
-      if (isa<StoreInst>(inst))
-        return true;
-
-    return false;
-  }
-
-  enum class MergeTaint {
-    Or,
-    Add
-  };
-
-  void addToCoverageMap(IRBuilder<> &IRB, 
-                        unsigned long map_offset, Value *coverage,
-                        MergeTaint merge_mode) {
-    Type *coverage_ptr_type = PointerType::get(coverage->getType(), 0);
-
-    // Offsets are indizes into an array of 32 bit integers.
-    map_offset *= sizeof(unsigned int);
-    Type *coverage_map_type = Int8Ty;
-
-    if (coverage == nullptr) {
-      llvm::errs() << "coverage is a nullptr?\n";
-      abort();
-    }
-    if (!coverage->getType()->isIntegerTy()) {
-      llvm::errs() << "coverage is not an int?\n";
-      abort();
-    }
-
-    // Now load the AFL++ coverage map.
-    LoadInst *MapPtr =
-        IRB.CreateLoad(PointerType::get(coverage_map_type, 0), AFLMapPtr);
-    ModuleSanitizerCoverageAFL::SetNoSanitizeMetadata(MapPtr);
-
-    // Find the offset in the map we can use to give feedback.
-    Value *map_offset_ptr = ConstantInt::get(IntptrTy, map_offset);
-    Value *abs_map_ptr = IRB.CreateAdd(IRB.CreatePointerCast(FunctionGuardArray,
-                                       IntptrTy), map_offset_ptr);
-    SetNoSanitizeMetadata(abs_map_ptr);
-
-    // Cast that offset to a pointer.
-    Value *coverage_counter_ptr = IRB.CreateIntToPtr(abs_map_ptr, Int32PtrTy);
-    SetNoSanitizeMetadata(coverage_counter_ptr);
-
-    // Load the old value.
-    LoadInst *CurLoc = IRB.CreateLoad(IRB.getInt32Ty(), coverage_counter_ptr);
-    SetNoSanitizeMetadata(CurLoc);
-
-    // Load whatever coverage we already got.
-    Value* MapPtrIdx = IRB.CreateGEP(coverage_map_type, MapPtr, CurLoc);
-    SetNoSanitizeMetadata(MapPtrIdx);
-
-    Value *TypedMapPtrIdx =
-        IRB.CreateBitOrPointerCast(MapPtrIdx, coverage_ptr_type);
-
-    LoadInst *Counter =
-        IRB.CreateLoad(coverage->getType(), TypedMapPtrIdx, "old_cov");
-    SetNoSanitizeMetadata(Counter);
-    Value *ToStore = nullptr;
-
-    if (merge_mode == MergeTaint::Add) {
-      // Add the current label value to the counter. Untainted is label 0, so
-      // this means that for tainted memory this increases coverage.
-      ToStore = IRB.CreateAdd(Counter, coverage, "new_cov");
-      SetNoSanitizeMetadata(ToStore);
-    } else {
-      assert(merge_mode == MergeTaint::Or);
-      // Just or-in the label which is either 0 (no coverage and no taint)
-      // or non-zero (coverage and taint).
-      ToStore = IRB.CreateOr(Counter, coverage, "new_cov");
-      SetNoSanitizeMetadata(ToStore);
-    }
-
-    // Store the updated coverage back to the map so AFL++ sees it.
-    StoreInst *StoreCtx = IRB.CreateStore(ToStore, TypedMapPtrIdx, "store_cov");
-    SetNoSanitizeMetadata(StoreCtx);
-  }
-
-  void doSelectFeedback(llvm::SelectInst &i, unsigned long map_offset) {
-    IRBuilder<> IRB((&i)->getNextNode());
-
-    Value *condition = i.getCondition();
-    if (condition->getType()->isIntegerTy()) {
-      Value *condition_coverage = IRB.CreateZExtOrTrunc(condition, Int8Ty);
-      SetNoSanitizeMetadata(condition_coverage);
-
-      // Add the label to the coverage map.
-      addToCoverageMap(IRB, map_offset, condition_coverage, MergeTaint::Or);
-      return;
-    }
-
-    FixedVectorType *t = cast<FixedVectorType>(condition->getType());
-    for (unsigned i = 0; i < t->getNumElements(); ++i) {
-      Value *condition_bit = IRB.CreateExtractElement(condition, i);
-      SetNoSanitizeMetadata(condition_bit);
-      addToCoverageMap(IRB, map_offset + i, condition_bit, MergeTaint::Or);
-    }
-  }
-
-  static unsigned getBytesForType(llvm::Type *type) {
-    unsigned bytes = type->getScalarSizeInBits() / 8U;
-    if (bytes == 0) return 1;
-    return bytes;
-  }
-
-  static unsigned getBytesForDFSanMemoryOpImpl(llvm::Instruction &i) {
-    // Without MSan active, we just need 1 byte for the dfsan label.
-    llvm::Function *func = i.getParent()->getParent();
-    if (!func->hasFnAttribute(Attribute::SanitizeMemory)) return 1;
-
-    if (auto *load = dyn_cast<LoadInst>(&i))
-      return getBytesForType(load->getType());
-
-    if (auto *store = dyn_cast<StoreInst>(&i))
-      return getBytesForType(store->getValueOperand()->getType());
-
-    llvm::errs() << "bits requested for bogus instruction? " << i;
-    std::abort();
-  }
-
-  static unsigned getBytesForDFSanMemoryOp(llvm::Instruction &i) {
-    unsigned bytes = getBytesForDFSanMemoryOpImpl(i);
-    if (std::getenv("HWFUZZ_PRINT_SIZES"))
-      llvm::errs() << "COVERAGE: Using " << bytes << "B for " << i << "\n";
-    return bytes;
-  }
-
-  void doTaintFeedback(llvm::Instruction &i, unsigned long map_offset) {
-    if (!providesFeedback(i)) {
-      llvm::errs() << "Called on bogus non-taint instruction? " << i;
-      std::abort();
-    }
-
-    // Find the pointer that we want to check the taint value for.
-    // For load/stores it's just the pointer where the value is stored/loaded
-    // from/to.
-    Value *ptr = nullptr;
-    if (auto *load = dyn_cast<LoadInst>(&i)) {
-      ptr = load->getPointerOperand();
-    } else if (auto *store = dyn_cast<StoreInst>(&i)) {
-      ptr = store->getPointerOperand();
-    } else {
-      llvm::errs() << "Called on bogus instruction? " << i;
-      std::abort();
-    }
-    if (!ptr->getType()->isPointerTy())  {
-      llvm::errs() << "Not a pointer type?" << *ptr;
-      std::abort();
-    }
-
-    // Add taint instrumentation after the load/store.
-    // We do it after so that we can read the value taint for stores.
-    IRBuilder<> IRB((&i)->getNextNode());
-
-    // Calculate the shadow address of the loaded/store pointer.
-    Value *OffsetLong = IRB.CreatePointerCast(ptr, IntptrTy);
-    SetNoSanitizeMetadata(OffsetLong);
-
-    // The XOR mask that maps memory to shadow memory in DFSan/MSan.
-    const uint64_t XorMask = 0x500000000000;
-
-    // Map the address we're inspecting to the shadow memory.
-    Value *shadowAddr = IRB.CreateXor(OffsetLong, ConstantInt::get(IntptrTy, XorMask));
-    SetNoSanitizeMetadata(shadowAddr);
-
-    Type *shadowType =
-        IntegerType::get(i.getContext(),
-        /*bytes to bits*/8 * getBytesForDFSanMemoryOp(i));
-
-    // Cast the shadow address to a proper pointer.
-    Value *shadowPtr =
-        IRB.CreateIntToPtr(shadowAddr, PointerType::get(i.getContext(), 0));
-    SetNoSanitizeMetadata(shadowPtr);
-
-    // Load the shadow value that has the label.
-    LoadInst *dfsanLabel = IRB.CreateLoad(shadowType, shadowPtr);
-    SetNoSanitizeMetadata(dfsanLabel);
-
-    // Add the label to the coverage map.
-    addToCoverageMap(IRB, map_offset, dfsanLabel, MergeTaint::Or);
-  }
-
-  // Toggle feedback implementation.
-
-  static bool canDoToggleFeedback(llvm::StoreInst &i) {
-    return i.getValueOperand()->getType()->isIntegerTy();
-  }
-
-  static unsigned getBytesForToggleOp(llvm::Instruction &i) {
-    if (auto *load = dyn_cast<LoadInst>(&i))
-      return getBytesForType(load->getType());
-
-    if (auto *store = dyn_cast<StoreInst>(&i))
-      return getBytesForType(store->getValueOperand()->getType());
-
-    llvm::errs() << "bits requested for bogus instruction? " << i;
-    std::abort();
-  }
-
-  static unsigned getSlotsForToggleOp(StoreInst &toggleStore) {
-    const unsigned PCGuardSlotSize = 4U;
-    // Every PCGUARD slot can store 4 bytes, so we need to calculate the
-    // number of toggle bits and then return the number of slots we need.
-    // Each toggle bit counts for going from 0 to 1 and vice versa, so we
-    // twice as many feedback slots.
-    const unsigned bytes = getBytesForToggleOp(toggleStore);
-    const unsigned slots = (bytes * 2U)/ PCGuardSlotSize;
-    // We need always at least one slot to store some feedback.
-    if (slots == 0) return 1;
-    if (slots > 8) {
-      llvm::errs() << "Too many toggle slots. Size calculation wrong?\n";
-      abort();
-    }
-    return slots;
-  }
-
-  // Adds toggle feedback.
-  void doToggleFeedback(llvm::StoreInst &i, unsigned long map_offset) {
-    // Find the pointer that we want to check the taint value for.
-    // For load/stores it's just the pointer where the value is stored/loaded
-    // from/to.
-    Value *ptr = i.getPointerOperand();
-    if (!canDoToggleFeedback(i))  {
-      llvm::errs() << "Bogus toggle feedback inst?" << i;
-      std::abort();
-    }
-
-    // Add toggle information for the load/store.
-    IRBuilder<> IRB(&i);
-
-    Value *old_value = i.getValueOperand();
-    // Load the shadow value that has the label.
-    LoadInst *new_value = IRB.CreateLoad(old_value->getType(), ptr);
-    SetNoSanitizeMetadata(new_value);
-
-    Value *is_different = IRB.CreateXor(new_value, old_value);
-    SetNoSanitizeMetadata(is_different);
-
-    // Toggle to 1 if old/new bits are different and new value is 1.
-    Value *toggle_to_1 = IRB.CreateAnd(new_value, is_different);
-    SetNoSanitizeMetadata(toggle_to_1);
-
-    // Toggle to 0 if old/new bits are different and old value is 1.
-    Value *toggle_to_0 = IRB.CreateAnd(old_value, is_different);
-    SetNoSanitizeMetadata(toggle_to_0);
-
-    // Add the toggle information to the coverage map.
-    addToCoverageMap(IRB, map_offset, toggle_to_0, MergeTaint::Or);
-    addToCoverageMap(IRB, map_offset + getSlotsForToggleOp(i),
-                     toggle_to_1, MergeTaint::Or);
-  }
+  std::unique_ptr<HardwareInstrumentation> hwInstrumentation;
 };
 
 }  // namespace
@@ -804,6 +536,22 @@ bool ModuleSanitizerCoverageAFL::instrumentModule(
 
   }
 
+
+  hwInstrumentation.reset(new HardwareInstrumentation());
+  hwInstrumentation->C = C;
+  hwInstrumentation->AFLMapPtr = AFLMapPtr;
+  hwInstrumentation->IntptrTy = IntptrTy;
+  hwInstrumentation->IntptrPtrTy = IntptrPtrTy;
+  hwInstrumentation->Int64Ty = Int64Ty;
+  hwInstrumentation->Int64PtrTy = Int64PtrTy;
+  hwInstrumentation->Int32Ty = Int32Ty;
+  hwInstrumentation->Int32PtrTy = Int32PtrTy;
+  hwInstrumentation->Int16Ty = Int16Ty;
+  hwInstrumentation->Int8Ty = Int8Ty;
+  hwInstrumentation->Int1Ty = Int1Ty;
+  hwInstrumentation->Int1PtrTy = Int1PtrTy;
+  hwInstrumentation->FunctionGuardArray = FunctionGuardArray;
+
   return true;
 
 }
@@ -1080,111 +828,19 @@ void ModuleSanitizerCoverageAFL::CreateFunctionLocalArrays(
 
 bool ModuleSanitizerCoverageAFL::InjectCoverage(
     Function &F, ArrayRef<BasicBlock *> AllBlocksDummy, bool IsLeafFunc) {
-  std::vector<BasicBlock *> AllBlocks;
 
-  if (isModeOn(CoverageMode::Edge)) {
-    for (auto &BB : F)
-      AllBlocks.push_back(&BB);
-  }
+  // Find all coverage points we plan to inject.
+  unsigned neededSlots = hwInstrumentation->findCoveragePoints(F);
 
-  struct DelayedInstrumentation {
-    unsigned long mapPos = 0;
-    Instruction *toInstrumentForDFSan = nullptr;
-    SelectInst  *selectInst = nullptr;
-    StoreInst   *toggleStore = nullptr;
+  // Dummy variable. We don't do block coverage.
+  std::vector<BasicBlock *> NoBlocksDummy;
+  // Create PCGuard array to store the coverage.
+  CreateFunctionLocalArrays(F, NoBlocksDummy, neededSlots);
 
-    unsigned requiredMapElements() const {
-      const unsigned PCGuardSlotSize = 4U;
-      if (toInstrumentForDFSan) {
-        // Every PCGUARD slot can store 4 bytes, so we need to calculate the
-        // number of taint bits and then return the number of slots we need.
-        const unsigned bytes = getBytesForDFSanMemoryOp(*toInstrumentForDFSan);
-        const unsigned slots = bytes / PCGuardSlotSize;
-        // We need always at least one slot to store some feedback.
-        if (slots == 0) return 1;
-        if (slots > 4) {
-          llvm::errs() << "Too many dfsan slots. Size calculation wrong?\n";
-          abort();
-        }
-        return slots;
-      }
-      if (selectInst) {
-        Type *conditionT = selectInst->getCondition()->getType();
-        if (conditionT->isIntegerTy())
-          return 1;
-        return cast<FixedVectorType>(conditionT)->getNumElements();
-      }
-      if (toggleStore)
-        return getSlotsForToggleOp(*toggleStore);
-      llvm::errs() << "Neither a DFSan, toggle nor select instrumentation?\n";
-      abort();
-    }
-  };
-  std::vector<DelayedInstrumentation> toInstrument;
-  unsigned map_offset = AllBlocks.size();
-  auto queueInstrumentation = [&](DelayedInstrumentation d){
-    // Mark which part of the map to use for this instrumentation.
-    d.mapPos = map_offset;
-
-    // Find the next free offset in the map we should use.
-    map_offset += d.requiredMapElements();
-
-    // Schedule for instrumentation after we're done iterating the IR.
-    toInstrument.push_back(d);
-  };
-
-  for (auto &BB : F) {
-    for (auto &I : BB) {
-      // Don't touch sanitizer instrumentation.
-      if (I.hasMetadata(I.getModule()->getMDKindID("nosanitize")))
-        continue;
-
-      // Queue to be instrumented for DFSan/select instrumentation.
-      // We can' do this here as we iterate over a list of instructions.
-      if (isModeOn(CoverageMode::Taint) && providesFeedback(I)) {
-        DelayedInstrumentation instrumentation;
-        instrumentation.toInstrumentForDFSan = &I;
-        queueInstrumentation(instrumentation);
-      }
-      // Select instructions behave like coverage blocks.
-      if (isModeOn(CoverageMode::Edge)) {
-        if (SelectInst *S = dyn_cast<SelectInst>(&I)) {
-          DelayedInstrumentation instrumentation;
-          instrumentation.selectInst = S;
-          queueInstrumentation(instrumentation);
-        }
-      }
-      if (isModeOn(CoverageMode::Toggle)) {
-        if (StoreInst *S = dyn_cast<StoreInst>(&I)) {
-          if (S->getValueOperand()->getType()->isIntegerTy()) {
-            DelayedInstrumentation instrumentation;
-            instrumentation.toggleStore = S;
-            queueInstrumentation(instrumentation);
-          }
-        }
-      }
-    }
-  }
-  instr += toInstrument.size();
-
-  // Create PCGuard array. +1 to ensure it's never empty.
-  CreateFunctionLocalArrays(F, AllBlocks, toInstrument.size() + 1);
-
-  // Now add the DFSan taint feedback for every instruction we found above.
-  for (const auto &target : toInstrument) {
-    if (target.toInstrumentForDFSan)
-      doTaintFeedback(*target.toInstrumentForDFSan, target.mapPos);
-    if (target.toggleStore)
-      doToggleFeedback(*target.toggleStore, target.mapPos);
-    if (target.selectInst)
-      doSelectFeedback(*target.selectInst, target.mapPos);
-  }
-
-  unsigned block_index = 0;
-  for (auto &BB : AllBlocks)
-    InjectCoverageAtBlock(F, *BB, block_index++, IsLeafFunc);
-
-
+  // Inject instrumentation that fills out the coverage slots during
+  // runtime with the respective data.
+  hwInstrumentation->injectCoverage();
+  
   return true;
 }
 
