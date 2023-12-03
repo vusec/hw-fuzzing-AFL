@@ -332,7 +332,7 @@ struct HardwareInstrumentation {
   }
 
   void doBranchFeedback(llvm::BranchInst &i, unsigned long mapOffset) {
-    IRBuilder<> IRB((&i)->getNextNode());
+    IRBuilder<> IRB(&i);
 
     Value *condition = i.getCondition();
     if (!condition->getType()->isIntegerTy())
