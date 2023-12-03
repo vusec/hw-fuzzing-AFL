@@ -16,6 +16,7 @@
 #include <random>
 
 namespace {
+
 using namespace llvm;
 
 
@@ -47,6 +48,7 @@ static unsigned getBytesForType(llvm::Type *type) {
   if (bytes == 0) return 1;
   return bytes;
 }
+
 //-----------------------------------------------------------------------------
 // Taint feedback utils.
 //-----------------------------------------------------------------------------
@@ -98,17 +100,36 @@ static unsigned getSlotsForToggleOp(StoreInst &toggleStore) {
   const unsigned slots = (bytes * 2U) / PCGuardSlotSize;
   // We need always at least one slot to store some feedback.
   if (slots == 0) return 1;
-  if (slots > 8) {
+  if (slots > 8)
     exitWithErr("Too many toggle slots. Size calculation wrong?");
-  }
+
   return slots;
 }
 
+static unsigned getMapElementsForCondition() {
+  // This is just here so we can later maybe use multiple 4-byte fields for
+  // conditions. Unclear if this is really necessary at the moment. 
+  return 1;
+}
+
+/// Stores information needed to instrument a piece of code with coverage
+/// information. Needed because we first scan for coverage points, then
+/// allocate the coverage map and then do the actual coverage instrumentation.
 struct DelayedInstrumentation {
   unsigned long mapPos = 0;
+
+  /// A store/load that provides coverage when it stores/loads tainted data.
   Instruction  *toInstrumentForDFSan = nullptr;
+
+  /// A select that provides coverage depending on which branch it selects.
   SelectInst   *selectInst = nullptr;
+
+  /// A store that provides coverage depending on whether it set each bit
+  /// to 0 or 1.
   StoreInst    *toggleStore = nullptr;
+
+  /// A condition brancht hat provides coverade depending on whether it was
+  /// taken.
   BranchInst   *branch = nullptr;
 
   unsigned requiredMapElements() const {
@@ -120,17 +141,19 @@ struct DelayedInstrumentation {
       const unsigned slots = bytes / PCGuardSlotSize;
       // We need always at least one slot to store some feedback.
       if (slots == 0) return 1;
+      // More than 4 slots means we have memory op > 128 bits. That's most
+      // likely a bug in the size calculation.
       if (slots > 4)
         exitWithErr("Too many dfsan slots. Size calculation wrong?");
       return slots;
     }
     if (selectInst) {
       Type *conditionT = selectInst->getCondition()->getType();
-      if (conditionT->isIntegerTy()) return 1;
+      if (conditionT->isIntegerTy()) return getMapElementsForCondition();
       return cast<FixedVectorType>(conditionT)->getNumElements();
     }
     if (toggleStore) return getSlotsForToggleOp(*toggleStore);
-    if (branch) return 2;
+    if (branch) return getMapElementsForCondition();
     
     exitWithErr("Neither a DFSan, toggle nor select instrumentation?");
   }
@@ -171,15 +194,12 @@ struct HardwareInstrumentation {
     if (inst.hasMetadata(inst.getModule()->getMDKindID("nosanitize")))
       return false;
 
-    // Disable all instrumentation if HWFUZZ_NO_DFSAN is set.
-    if (getenv("HWFUZZ_NO_DFSAN")) return false;
-
     // Optionally mark loads as providing feedback on taint.
-    if (getenv("HWFUZZ_NO_LOAD") == nullptr)
+    if (isModeOn(CoverageMode::TaintLoads))
       if (isa<LoadInst>(inst)) return true;
 
     // Optionally mark stores as providing feedback on taint.
-    if (getenv("HWFUZZ_NO_STORE") == nullptr)
+    if (isModeOn(CoverageMode::Taint))
       if (isa<StoreInst>(inst)) return true;
 
     return false;
@@ -250,14 +270,35 @@ struct HardwareInstrumentation {
     SetNoSanitizeMetadata(StoreCtx);
   }
 
+  // Whether this condition is part of a vector of conditions.
+  // Used so we can omit the 'not executed' case when saving coverage.
+  // (see below).
+  enum class IsPartOfConditionVec {
+    Yes,
+    No
+  };
+
   void addConditionToCoverageMap(IRBuilder<> &IRB, unsigned long mapOffset,
-                                 Value *condition) {
-    // Increment the condition so that the coverage point has the following
-    // meanings:
+                                 Value *condition,
+                                 IsPartOfConditionVec partOfConditionVec = IsPartOfConditionVec::No) {
+    // If this is part of a condition vector, we don't need to do the extra
+    // operation below for any but the first condition to convey the 'executed'
+    // case. The first condition takes care of this.
+    if (partOfConditionVec == IsPartOfConditionVec::Yes) {
+      addToCoverageMap(IRB, mapOffset, condition, MergeTaint::Or);
+      return;
+    }
+
+    Value *condition_i32 = IRB.CreateZExtOrTrunc(condition, Int8Ty);
+
+    // Add one to the condition so that the coverage point has the
+    // following meanings:
     // 0 -> not executed.
     // 1 -> false branch taken.
     // 2 -> true branch taken.
-    Value *condition_non_zero =
+    // This way the fuzzer can distinguish between those three cases. Without
+    // this the fuzzer would see the same coverage for not executed and 'false'.
+    Value *condition_non_zero = 
       IRB.CreateAdd(condition, ConstantInt::get(Int8Ty, 1));
     SetNoSanitizeMetadata(condition_non_zero);
     
@@ -282,7 +323,11 @@ struct HardwareInstrumentation {
       Value *condition_bit = IRB.CreateExtractElement(condition, i);
       SetNoSanitizeMetadata(condition_bit);
 
-      addConditionToCoverageMap(IRB, mapOffset + i, condition_bit);
+      // See implementation of addConditionToCoverageMap for why we
+      // special case the first condition and not the others.
+      addConditionToCoverageMap(IRB, mapOffset + i, condition_bit,
+                                i == 0 ? IsPartOfConditionVec::No :
+                                         IsPartOfConditionVec::Yes);
     }
   }
 
