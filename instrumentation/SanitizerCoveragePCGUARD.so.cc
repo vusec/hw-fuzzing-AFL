@@ -478,6 +478,23 @@ bool ModuleSanitizerCoverageAFL::instrumentModule(
   SanCovTracePCGuard =
       M.getOrInsertFunction(SanCovTracePCGuardName, VoidTy, Int32PtrTy);
 
+  hwInstrumentation.reset(new HardwareInstrumentation());
+  hwInstrumentation->C = C;
+  hwInstrumentation->AFLMapPtr = AFLMapPtr;
+  hwInstrumentation->IntptrTy = IntptrTy;
+  hwInstrumentation->IntptrPtrTy = IntptrPtrTy;
+  hwInstrumentation->Int64Ty = Int64Ty;
+  hwInstrumentation->Int64PtrTy = Int64PtrTy;
+  hwInstrumentation->Int32Ty = Int32Ty;
+  hwInstrumentation->Int32PtrTy = Int32PtrTy;
+  hwInstrumentation->Int16Ty = Int16Ty;
+  hwInstrumentation->Int8Ty = Int8Ty;
+  hwInstrumentation->Int1Ty = Int1Ty;
+  hwInstrumentation->Int1PtrTy = Int1PtrTy;
+  // This will be initialized later, so we pass a pointer to the field that will
+  // be filled out by the default AFL++ code.
+  hwInstrumentation->FunctionGuardArray = &FunctionGuardArray;
+
   for (auto &F : M)
     instrumentFunction(F, DTCallback, PDTCallback);
 
@@ -535,22 +552,6 @@ bool ModuleSanitizerCoverageAFL::instrumentModule(
     }
 
   }
-
-
-  hwInstrumentation.reset(new HardwareInstrumentation());
-  hwInstrumentation->C = C;
-  hwInstrumentation->AFLMapPtr = AFLMapPtr;
-  hwInstrumentation->IntptrTy = IntptrTy;
-  hwInstrumentation->IntptrPtrTy = IntptrPtrTy;
-  hwInstrumentation->Int64Ty = Int64Ty;
-  hwInstrumentation->Int64PtrTy = Int64PtrTy;
-  hwInstrumentation->Int32Ty = Int32Ty;
-  hwInstrumentation->Int32PtrTy = Int32PtrTy;
-  hwInstrumentation->Int16Ty = Int16Ty;
-  hwInstrumentation->Int8Ty = Int8Ty;
-  hwInstrumentation->Int1Ty = Int1Ty;
-  hwInstrumentation->Int1PtrTy = Int1PtrTy;
-  hwInstrumentation->FunctionGuardArray = FunctionGuardArray;
 
   return true;
 
@@ -828,6 +829,9 @@ void ModuleSanitizerCoverageAFL::CreateFunctionLocalArrays(
 
 bool ModuleSanitizerCoverageAFL::InjectCoverage(
     Function &F, ArrayRef<BasicBlock *> AllBlocksDummy, bool IsLeafFunc) {
+
+  if (hwInstrumentation.get() == nullptr)
+    exitWithErr("Didn't initialize hwInstrumentation?");
 
   // Find all coverage points we plan to inject.
   unsigned neededSlots = hwInstrumentation->findCoveragePoints(F);

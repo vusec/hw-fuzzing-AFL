@@ -173,7 +173,7 @@ struct HardwareInstrumentation {
   Type           *Int8PtrTy;
   Type           *Int1Ty;
   Type           *Int1PtrTy;
-  GlobalVariable *FunctionGuardArray;
+  GlobalVariable **FunctionGuardArray;
 
   std::vector<DelayedInstrumentation> toInstrument;
 
@@ -229,7 +229,7 @@ struct HardwareInstrumentation {
     // Find the offset in the map we can use to give feedback.
     Value *mapOffset_ptr = ConstantInt::get(IntptrTy, mapOffset);
     Value *abs_map_ptr = IRB.CreateAdd(
-        IRB.CreatePointerCast(FunctionGuardArray, IntptrTy), mapOffset_ptr);
+        IRB.CreatePointerCast(*FunctionGuardArray, IntptrTy), mapOffset_ptr);
     SetNoSanitizeMetadata(abs_map_ptr);
 
     // Cast that offset to a pointer.
@@ -289,7 +289,7 @@ struct HardwareInstrumentation {
       return;
     }
 
-    Value *condition_i32 = IRB.CreateZExtOrTrunc(condition, Int8Ty);
+    Value *condition_i8 = IRB.CreateZExtOrTrunc(condition, Int8Ty);
 
     // Add one to the condition so that the coverage point has the
     // following meanings:
@@ -299,7 +299,7 @@ struct HardwareInstrumentation {
     // This way the fuzzer can distinguish between those three cases. Without
     // this the fuzzer would see the same coverage for not executed and 'false'.
     Value *condition_non_zero = 
-      IRB.CreateAdd(condition, ConstantInt::get(Int8Ty, 1));
+      IRB.CreateAdd(condition_i8, ConstantInt::get(Int8Ty, 1));
     SetNoSanitizeMetadata(condition_non_zero);
     
     addToCoverageMap(IRB, mapOffset, condition_non_zero, MergeTaint::Or);
@@ -439,7 +439,7 @@ struct HardwareInstrumentation {
   /// Finds all coverage points that should be instrumented.
   /// Returns the number of required 4 byte slots in the coverage map.
   unsigned findCoveragePoints(Function &F) {
-    toInstrument = {};
+    toInstrument.clear();
     // The current map offset.
     // Starts at 1 because AFL++ uses the first coverage field to indicate
     // that the function array has been initialized.
