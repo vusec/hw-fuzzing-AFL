@@ -226,6 +226,10 @@ struct HardwareInstrumentation {
         IRB.CreateLoad(PointerType::get(coverage_map_type, 0), AFLMapPtr);
     SetNoSanitizeMetadata(MapPtr);
 
+    // This variable is initialized by AFL++.
+    if (*FunctionGuardArray == nullptr)
+      exitWithErr("Didn't initialize FunctionGuardArray?");
+
     // Find the offset in the map we can use to give feedback.
     Value *mapOffset_ptr = ConstantInt::get(IntptrTy, mapOffset);
     Value *abs_map_ptr = IRB.CreateAdd(
@@ -335,7 +339,7 @@ struct HardwareInstrumentation {
     IRBuilder<> IRB(&i);
 
     Value *condition = i.getCondition();
-    if (!condition->getType()->isIntegerTy())
+    if (condition == nullptr)
       exitWithErr("Unconditional edges don't have coverage", condition);
 
     if (!condition->getType()->isIntegerTy())
