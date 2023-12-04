@@ -49,6 +49,8 @@ static unsigned getBytesForType(llvm::Type *type) {
   return bytes;
 }
 
+static constexpr unsigned PCGuardSlotSize = 4U;
+
 //-----------------------------------------------------------------------------
 // Taint feedback utils.
 //-----------------------------------------------------------------------------
@@ -91,7 +93,6 @@ static unsigned getBytesForToggleOp(llvm::Instruction &i) {
 }
 
 static unsigned getSlotsForToggleOp(StoreInst &toggleStore) {
-  const unsigned PCGuardSlotSize = 4U;
   // Every PCGUARD slot can store 4 bytes, so we need to calculate the
   // number of toggle bits and then return the number of slots we need.
   // Each toggle bit counts for going from 0 to 1 and vice versa, so we
@@ -104,12 +105,6 @@ static unsigned getSlotsForToggleOp(StoreInst &toggleStore) {
     exitWithErr("Too many toggle slots. Size calculation wrong?");
 
   return slots;
-}
-
-static unsigned getMapElementsForCondition() {
-  // This is just here so we can later maybe use multiple 4-byte fields for
-  // conditions. Unclear if this is really necessary at the moment. 
-  return 1;
 }
 
 /// Stores information needed to instrument a piece of code with coverage
@@ -133,7 +128,6 @@ struct DelayedInstrumentation {
   BranchInst   *branch = nullptr;
 
   unsigned requiredMapElements() const {
-    const unsigned PCGuardSlotSize = 4U;
     if (toInstrumentForDFSan) {
       // Every PCGUARD slot can store 4 bytes, so we need to calculate the
       // number of taint bits and then return the number of slots we need.
@@ -149,11 +143,11 @@ struct DelayedInstrumentation {
     }
     if (selectInst) {
       Type *conditionT = selectInst->getCondition()->getType();
-      if (conditionT->isIntegerTy()) return getMapElementsForCondition();
+      if (conditionT->isIntegerTy()) return 1;
       return cast<FixedVectorType>(conditionT)->getNumElements();
     }
     if (toggleStore) return getSlotsForToggleOp(*toggleStore);
-    if (branch) return getMapElementsForCondition();
+    if (branch) return 1;
     
     exitWithErr("Neither a DFSan, toggle nor select instrumentation?");
   }
