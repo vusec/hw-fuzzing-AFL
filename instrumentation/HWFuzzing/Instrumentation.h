@@ -213,7 +213,7 @@ struct HardwareInstrumentation {
     // Bounds check the map offset.
     if (mapOffset >= lastMapSize) {
       exitWithErr("mapOffset beyond lastMapSize (" + std::to_string(mapOffset)
-      + " >= " + std::to_string(lastMapSize)) + ")";
+      + " >= " + std::to_string(lastMapSize) + ")");
     }
     if (mapOffset < minAllowedMapAccess) {
       exitWithErr("mapOffset below allowed range (" + std::to_string(mapOffset)
@@ -528,7 +528,7 @@ struct HardwareInstrumentation {
     // Add the feedback for every instruction we found above.
     for (const auto &target : toInstrument) {
       minAllowedMapAccess = target.mapPos;
-      maxAllowedMapAccess = target.mapPos + target.requiredMapElements;
+      maxAllowedMapAccess = target.mapPos + target.requiredMapElements();
 
       if (target.toInstrumentForDFSan)
         doTaintFeedback(*target.toInstrumentForDFSan, target.mapPos);
