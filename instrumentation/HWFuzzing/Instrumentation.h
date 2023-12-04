@@ -19,7 +19,13 @@ namespace {
 
 using namespace llvm;
 
+
+/// The size of one coverage map element in our coverage map.
+static constexpr unsigned MapElementByteSize = 4U;
+
+// Offset in the coverage map IN BYTES.
 typedef unsigned long MapByteOffset;
+// Offset in the coverage map in elements of size MapElementByteSize.
 typedef unsigned long MapElementOffset;
 
 [[noreturn]]
@@ -50,10 +56,6 @@ static unsigned getBytesForType(llvm::Type *type) {
   if (bytes == 0) return 1;
   return bytes;
 }
-
-/// The size of one coverage map element in our coverage map.
-static constexpr unsigned MapElementByteSize = 4U;
-
 //-----------------------------------------------------------------------------
 // Taint feedback utils.
 //-----------------------------------------------------------------------------
@@ -112,7 +114,7 @@ static unsigned getSlotsForToggleOp(StoreInst &toggleStore) {
 /// information. Needed because we first scan for coverage points, then
 /// allocate the coverage map and then do the actual coverage instrumentation.
 struct DelayedInstrumentation {
-  MapByteOffset mapPos = 0;
+  MapElementOffset mapPos = 0;
 
   /// A store/load that provides coverage when it stores/loads tainted data.
   Instruction  *toInstrumentForDFSan = nullptr;
@@ -355,7 +357,7 @@ struct HardwareInstrumentation {
     }
   }
 
-  void doBranchFeedback(llvm::BranchInst &i, unsigned long mapOffset) {
+  void doBranchFeedback(llvm::BranchInst &i, MapByteOffset mapOffset) {
     IRBuilder<> IRB(&i);
 
     Value *condition = i.getCondition();
@@ -467,7 +469,7 @@ struct HardwareInstrumentation {
     // The current map offset.
     // Starts at 1 because AFL++ uses the first coverage field to indicate
     // that the function array has been initialized.
-    unsigned mapOffset = 1;
+    MapElementOffset mapOffset = 1;
     auto queueInstrumentation = [&](DelayedInstrumentation d){
       // Mark which part of the map to use for this instrumentation.
       d.mapPos = mapOffset;
@@ -535,14 +537,16 @@ struct HardwareInstrumentation {
       minAllowedMapAccess = target.mapPos;
       maxAllowedMapAccess = target.mapPos + target.requiredMapElements();
 
+      const MapByteOffset mapPos = target.mapPos * MapElementByteSize;
+
       if (target.toInstrumentForDFSan)
-        doTaintFeedback(*target.toInstrumentForDFSan, target.mapPos);
+        doTaintFeedback(*target.toInstrumentForDFSan, mapPos);
       else if (target.toggleStore)
-        doToggleFeedback(*target.toggleStore, target.mapPos);
+        doToggleFeedback(*target.toggleStore, mapPos);
       else if (target.selectInst)
-        doSelectFeedback(*target.selectInst, target.mapPos);
+        doSelectFeedback(*target.selectInst, mapPos);
       else if (target.branch)
-        doBranchFeedback(*target.branch, target.mapPos);
+        doBranchFeedback(*target.branch, mapPos);
       else {
         exitWithErr("Not a valid coverage point?");
       }
