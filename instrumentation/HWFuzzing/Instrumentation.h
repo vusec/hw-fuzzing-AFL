@@ -294,7 +294,7 @@ struct HardwareInstrumentation {
     No
   };
 
-  void addConditionToCoverageMap(IRBuilder<> &IRB, MapByteOffset mapOffset,
+  void addConditionToCoverageMap(IRBuilder<> &IRB, MapElementOffset mapOffset,
                                  Value *condition_raw,
                                  IsPartOfConditionVec partOfConditionVec
                                    = IsPartOfConditionVec::No) {
@@ -325,7 +325,7 @@ struct HardwareInstrumentation {
     addToCoverageMap(IRB, mapOffset, condition_non_zero, MergeTaint::Or);
   }
 
-  void doSelectFeedback(llvm::SelectInst &i, MapByteOffset mapOffset) {
+  void doSelectFeedback(llvm::SelectInst &i, MapElementOffset mapOffset) {
     IRBuilder<> IRB((&i)->getNextNode());
 
     Value *condition = i.getCondition();
@@ -351,7 +351,7 @@ struct HardwareInstrumentation {
     }
   }
 
-  void doBranchFeedback(llvm::BranchInst &i, MapByteOffset mapOffset) {
+  void doBranchFeedback(llvm::BranchInst &i, MapElementOffset mapOffset) {
     IRBuilder<> IRB(&i);
 
     Value *condition = i.getCondition();
@@ -368,7 +368,7 @@ struct HardwareInstrumentation {
     addConditionToCoverageMap(IRB, mapOffset, condition_coverage);
   }
 
-  void doTaintFeedback(llvm::Instruction &i, MapByteOffset mapOffset) {
+  void doTaintFeedback(llvm::Instruction &i, MapElementOffset mapOffset) {
     if (!providesFeedback(i)) {
       exitWithErr("Called on bogus non-taint instruction? ", i);
     }
