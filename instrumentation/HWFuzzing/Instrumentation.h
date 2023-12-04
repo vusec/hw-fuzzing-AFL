@@ -22,9 +22,6 @@ using namespace llvm;
 
 /// The size of one coverage map element in our coverage map.
 static constexpr unsigned MapElementByteSize = 4U;
-
-// Offset in the coverage map IN BYTES.
-typedef unsigned long MapByteOffset;
 // Offset in the coverage map in elements of size MapElementByteSize.
 typedef unsigned long MapElementOffset;
 
@@ -56,6 +53,7 @@ static unsigned getBytesForType(llvm::Type *type) {
   if (bytes == 0) return 1;
   return bytes;
 }
+
 //-----------------------------------------------------------------------------
 // Taint feedback utils.
 //-----------------------------------------------------------------------------
@@ -103,9 +101,9 @@ static unsigned getSlotsForToggleOp(StoreInst &toggleStore) {
   // Each toggle bit counts for going from 0 to 1 and vice versa, so we
   // twice as many feedback slots.
   const unsigned bytes = getBytesForToggleOp(toggleStore);
-  const unsigned slots = (bytes * 2U) / MapElementByteSize;
-  // We need always at least one slot to store any feedback.
-  if (slots == 0) return 1;
+  const unsigned slots = (bytes / MapElementByteSize) * 2;
+  // We need always at least two slots to store feedback for toggle to 0 and 1.
+  if (slots <= 1) return 2;
 
   return slots;
 }
@@ -211,9 +209,9 @@ struct HardwareInstrumentation {
 
   enum class MergeTaint { Or, Add };
 
-  void addToCoverageMap(IRBuilder<> &IRB, MapByteOffset mapOffsetInBytes,
+  void addToCoverageMap(IRBuilder<> &IRB, MapElementOffset mapOffset,
                         Value *coverage, MergeTaint merge_mode) {
-    MapElementOffset mapOffset = mapOffsetInBytes / MapElementByteSize;
+    unsigned mapOffsetInBytes = mapOffset * MapElementByteSize;
   
     // Bounds check the map offset.
     if (mapOffset >= lastMapSize)
@@ -383,9 +381,9 @@ struct HardwareInstrumentation {
       ptr = load->getPointerOperand();
     } else if (auto *store = dyn_cast<StoreInst>(&i)) {
       ptr = store->getPointerOperand();
-    } else {
+    } else
       exitWithErr("Called on bogus instruction? ", i);
-    }
+
     if (!ptr->getType()->isPointerTy()) {
       llvm::errs() << "Not a pointer type?" << *ptr;
       std::abort();
@@ -454,7 +452,7 @@ struct HardwareInstrumentation {
 
     // Add the toggle information to the coverage map.
     addToCoverageMap(IRB, mapOffset, toggle_to_0, MergeTaint::Or);
-    addToCoverageMap(IRB, mapOffset + getBytesForToggleOp(i), toggle_to_1,
+    addToCoverageMap(IRB, mapOffset + getSlotsForToggleOp(i) / 2, toggle_to_1,
                      MergeTaint::Or);
   }
 
@@ -533,7 +531,7 @@ struct HardwareInstrumentation {
       minAllowedMapAccess = target.mapPos;
       maxAllowedMapAccess = target.mapPos + target.requiredMapElements();
 
-      const MapByteOffset mapPos = target.mapPos * MapElementByteSize;
+      const MapElementOffset mapPos = target.mapPos;
 
       if (target.toInstrumentForDFSan)
         doTaintFeedback(*target.toInstrumentForDFSan, mapPos);
