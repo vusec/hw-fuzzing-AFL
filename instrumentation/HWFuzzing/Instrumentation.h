@@ -216,21 +216,17 @@ struct HardwareInstrumentation {
     MapElementOffset mapOffset = mapOffsetInBytes / MapElementByteSize;
   
     // Bounds check the map offset.
-    if (mapOffset >= lastMapSize) {
+    if (mapOffset >= lastMapSize)
       exitWithErr("mapOffset beyond lastMapSize (" + std::to_string(mapOffset)
       + " >= " + std::to_string(lastMapSize) + ")");
-    }
-    if (mapOffset < minAllowedMapAccess) {
+    if (mapOffset < minAllowedMapAccess)
       exitWithErr("mapOffset below allowed range (" + std::to_string(mapOffset)
       + " < " + std::to_string(minAllowedMapAccess) + ")");
-    }
-    if (mapOffset >= maxAllowedMapAccess) {
+    if (mapOffset >= maxAllowedMapAccess)
       exitWithErr("mapOffset beyond allowed range (" + std::to_string(mapOffset)
       + " >= " + std::to_string(maxAllowedMapAccess) + ")");
-    }
 
     Type *coverage_ptr_type = PointerType::get(coverage->getType(), 0);
-
     Type *coverage_map_type = Int8Ty;
 
     if (coverage == nullptr)
