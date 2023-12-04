@@ -171,6 +171,13 @@ struct HardwareInstrumentation {
 
   std::vector<DelayedInstrumentation> toInstrument;
 
+  // Bounds check utils to verify that each instrumentation sticks to its own
+  // slot in the coverage map. This is just redundant error checking and is
+  // not used for anything else.
+  unsigned lastMapSize = 0;
+  unsigned minAllowedMapAccess = 0;
+  unsigned maxAllowedMapAccess = 0;
+
   void SetNoSanitizeMetadata(Value *V) {
     if (Instruction *I = dyn_cast<Instruction>(V)) SetNoSanitizeMetadata(I);
   }
@@ -203,6 +210,20 @@ struct HardwareInstrumentation {
 
   void addToCoverageMap(IRBuilder<> &IRB, unsigned long mapOffset,
                         Value *coverage, MergeTaint merge_mode) {
+    // Bounds check the map offset.
+    if (mapOffset >= lastMapSize) {
+      exitWithErr("mapOffset beyond lastMapSize (" + std::to_string(mapOffset)
+      + " >= " + std::to_string(lastMapSize)) + ")";
+    }
+    if (mapOffset < minAllowedMapAccess) {
+      exitWithErr("mapOffset below allowed range (" + std::to_string(mapOffset)
+      + " < " + std::to_string(minAllowedMapAccess) + ")");
+    }
+    if (mapOffset >= maxAllowedMapAccess) {
+      exitWithErr("mapOffset beyond allowed range (" + std::to_string(mapOffset)
+      + " >= " + std::to_string(maxAllowedMapAccess) + ")");
+    }
+
     Type *coverage_ptr_type = PointerType::get(coverage->getType(), 0);
 
     // Offsets are indizes into an array of 32 bit integers.
@@ -499,12 +520,16 @@ struct HardwareInstrumentation {
       }
     }
 
-    return mapOffset;
+    lastMapSize = mapOffset;
+    return lastMapSize;
   }
 
   void injectCoverage() {
     // Add the feedback for every instruction we found above.
     for (const auto &target : toInstrument) {
+      minAllowedMapAccess = target.mapPos;
+      maxAllowedMapAccess = target.mapPos + target.requiredMapElements;
+
       if (target.toInstrumentForDFSan)
         doTaintFeedback(*target.toInstrumentForDFSan, target.mapPos);
       else if (target.toggleStore)
