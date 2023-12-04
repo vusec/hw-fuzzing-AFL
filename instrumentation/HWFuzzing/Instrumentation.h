@@ -19,6 +19,8 @@ namespace {
 
 using namespace llvm;
 
+typedef unsigned long MapByteOffset;
+typedef unsigned long MapElementOffset;
 
 [[noreturn]]
 inline void exitWithErr(std::string error) {
@@ -49,7 +51,8 @@ static unsigned getBytesForType(llvm::Type *type) {
   return bytes;
 }
 
-static constexpr unsigned PCGuardSlotSize = 4U;
+/// The size of one coverage map element in our coverage map.
+static constexpr unsigned MapElementByteSize = 4U;
 
 //-----------------------------------------------------------------------------
 // Taint feedback utils.
@@ -98,11 +101,9 @@ static unsigned getSlotsForToggleOp(StoreInst &toggleStore) {
   // Each toggle bit counts for going from 0 to 1 and vice versa, so we
   // twice as many feedback slots.
   const unsigned bytes = getBytesForToggleOp(toggleStore);
-  const unsigned slots = (bytes * 2U) / PCGuardSlotSize;
-  // We need always at least one slot to store some feedback.
+  const unsigned slots = (bytes * 2U) / MapElementByteSize;
+  // We need always at least one slot to store any feedback.
   if (slots == 0) return 1;
-  if (slots > 8)
-    exitWithErr("Too many toggle slots. Size calculation wrong?");
 
   return slots;
 }
@@ -111,7 +112,7 @@ static unsigned getSlotsForToggleOp(StoreInst &toggleStore) {
 /// information. Needed because we first scan for coverage points, then
 /// allocate the coverage map and then do the actual coverage instrumentation.
 struct DelayedInstrumentation {
-  unsigned long mapPos = 0;
+  MapByteOffset mapPos = 0;
 
   /// A store/load that provides coverage when it stores/loads tainted data.
   Instruction  *toInstrumentForDFSan = nullptr;
@@ -132,7 +133,7 @@ struct DelayedInstrumentation {
       // Every PCGUARD slot can store 4 bytes, so we need to calculate the
       // number of taint bits and then return the number of slots we need.
       const unsigned bytes = getBytesForDFSanMemoryOp(*toInstrumentForDFSan);
-      const unsigned slots = bytes / PCGuardSlotSize;
+      const unsigned slots = bytes / MapElementByteSize;
       // We need always at least one slot to store some feedback.
       if (slots == 0) return 1;
       // More than 4 slots means we have memory op > 128 bits. That's most
@@ -174,9 +175,9 @@ struct HardwareInstrumentation {
   // Bounds check utils to verify that each instrumentation sticks to its own
   // slot in the coverage map. This is just redundant error checking and is
   // not used for anything else.
-  unsigned lastMapSize = 0;
-  unsigned minAllowedMapAccess = 0;
-  unsigned maxAllowedMapAccess = 0;
+  MapElementOffset lastMapSize = 0;
+  MapElementOffset minAllowedMapAccess = 0;
+  MapElementOffset maxAllowedMapAccess = 0;
 
   void SetNoSanitizeMetadata(Value *V) {
     if (Instruction *I = dyn_cast<Instruction>(V)) SetNoSanitizeMetadata(I);
@@ -208,8 +209,10 @@ struct HardwareInstrumentation {
 
   enum class MergeTaint { Or, Add };
 
-  void addToCoverageMap(IRBuilder<> &IRB, unsigned long mapOffset,
+  void addToCoverageMap(IRBuilder<> &IRB, MapByteOffset mapOffsetInBytes,
                         Value *coverage, MergeTaint merge_mode) {
+    MapElementOffset mapOffset = mapOffsetInBytes / MapElementByteSize;
+  
     // Bounds check the map offset.
     if (mapOffset >= lastMapSize) {
       exitWithErr("mapOffset beyond lastMapSize (" + std::to_string(mapOffset)
@@ -226,8 +229,6 @@ struct HardwareInstrumentation {
 
     Type *coverage_ptr_type = PointerType::get(coverage->getType(), 0);
 
-    // Offsets are indizes into an array of 32 bit integers.
-    mapOffset *= sizeof(unsigned int);
     Type *coverage_map_type = Int8Ty;
 
     if (coverage == nullptr)
@@ -246,7 +247,7 @@ struct HardwareInstrumentation {
       exitWithErr("Didn't initialize FunctionGuardArray?");
 
     // Find the offset in the map we can use to give feedback.
-    Value *mapOffset_ptr = ConstantInt::get(IntptrTy, mapOffset);
+    Value *mapOffset_ptr = ConstantInt::get(IntptrTy, mapOffsetInBytes);
     Value *abs_map_ptr = IRB.CreateAdd(
         IRB.CreatePointerCast(*FunctionGuardArray, IntptrTy), mapOffset_ptr);
     SetNoSanitizeMetadata(abs_map_ptr);
@@ -297,9 +298,14 @@ struct HardwareInstrumentation {
     No
   };
 
-  void addConditionToCoverageMap(IRBuilder<> &IRB, unsigned long mapOffset,
-                                 Value *condition,
-                                 IsPartOfConditionVec partOfConditionVec = IsPartOfConditionVec::No) {
+  void addConditionToCoverageMap(IRBuilder<> &IRB, MapByteOffset mapOffset,
+                                 Value *condition_raw,
+                                 IsPartOfConditionVec partOfConditionVec
+                                   = IsPartOfConditionVec::No) {
+    // Each condition only needs one byte to represent all values. This way
+    // we can squeeze 4 conditions into one 4 byte slot.
+    Value *condition = IRB.CreateZExtOrTrunc(condition, Int8Ty);
+
     // If this is part of a condition vector, we don't need to do the extra
     // operation below for any but the first condition to convey the 'executed'
     // case. The first condition takes care of this.
@@ -308,7 +314,6 @@ struct HardwareInstrumentation {
       return;
     }
 
-    Value *condition_i8 = IRB.CreateZExtOrTrunc(condition, Int8Ty);
 
     // Add one to the condition so that the coverage point has the
     // following meanings:
@@ -318,13 +323,13 @@ struct HardwareInstrumentation {
     // This way the fuzzer can distinguish between those three cases. Without
     // this the fuzzer would see the same coverage for not executed and 'false'.
     Value *condition_non_zero = 
-      IRB.CreateAdd(condition_i8, ConstantInt::get(Int8Ty, 1));
+      IRB.CreateAdd(condition, ConstantInt::get(Int8Ty, 1));
     SetNoSanitizeMetadata(condition_non_zero);
     
     addToCoverageMap(IRB, mapOffset, condition_non_zero, MergeTaint::Or);
   }
 
-  void doSelectFeedback(llvm::SelectInst &i, unsigned long mapOffset) {
+  void doSelectFeedback(llvm::SelectInst &i, MapByteOffset mapOffset) {
     IRBuilder<> IRB((&i)->getNextNode());
 
     Value *condition = i.getCondition();
@@ -367,7 +372,7 @@ struct HardwareInstrumentation {
     addConditionToCoverageMap(IRB, mapOffset, condition_coverage);
   }
 
-  void doTaintFeedback(llvm::Instruction &i, unsigned long mapOffset) {
+  void doTaintFeedback(llvm::Instruction &i, MapByteOffset mapOffset) {
     if (!providesFeedback(i)) {
       exitWithErr("Called on bogus non-taint instruction? ", i);
     }
@@ -451,7 +456,7 @@ struct HardwareInstrumentation {
 
     // Add the toggle information to the coverage map.
     addToCoverageMap(IRB, mapOffset, toggle_to_0, MergeTaint::Or);
-    addToCoverageMap(IRB, mapOffset + getSlotsForToggleOp(i), toggle_to_1,
+    addToCoverageMap(IRB, mapOffset + getBytesForToggleOp(i), toggle_to_1,
                      MergeTaint::Or);
   }
 
