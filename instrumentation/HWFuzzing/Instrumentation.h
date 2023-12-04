@@ -117,6 +117,10 @@ struct DelayedInstrumentation {
   /// A store/load that provides coverage when it stores/loads tainted data.
   Instruction  *toInstrumentForDFSan = nullptr;
 
+  /// A random instruction at the start of the basic block.
+  /// Used for block coverage.
+  Instruction  *blockStart = nullptr;
+
   /// A select that provides coverage depending on which branch it selects.
   SelectInst   *selectInst = nullptr;
 
@@ -148,7 +152,9 @@ struct DelayedInstrumentation {
       return cast<FixedVectorType>(conditionT)->getNumElements();
     }
     if (toggleStore) return getSlotsForToggleOp(*toggleStore);
+    // Blocks and branches just need one byte to indicate the status.
     if (branch) return 1;
+    if (blockStart) return 1;
     
     exitWithErr("Neither a DFSan, toggle nor select instrumentation?");
   }
@@ -368,6 +374,15 @@ struct HardwareInstrumentation {
     addConditionToCoverageMap(IRB, mapOffset, condition_coverage);
   }
 
+  void doBBFeedback(llvm::Instruction &i, MapElementOffset mapOffset) {
+    IRBuilder<> IRB(&i);
+
+    Value *condition_coverage = ConstantInt::get(Int8Ty, 1);
+    SetNoSanitizeMetadata(condition_coverage);
+
+    addToCoverageMap(IRB, mapOffset, condition_coverage, MergeTaint::Or);
+  }
+
   void doTaintFeedback(llvm::Instruction &i, MapElementOffset mapOffset) {
     if (!providesFeedback(i)) {
       exitWithErr("Called on bogus non-taint instruction? ", i);
@@ -476,6 +491,11 @@ struct HardwareInstrumentation {
     };
 
     for (auto &BB : F) {
+      if (isModeOn(CoverageMode::BasicBlock)) {
+        DelayedInstrumentation instrumentation;
+        instrumentation.blockStart = BB.getFirstNonPHI();
+        queueInstrumentation(instrumentation);
+      }
       for (auto &I : BB) {
         // Don't touch sanitizer instrumentation.
         if (I.hasMetadata(I.getModule()->getMDKindID("nosanitize")))
@@ -490,7 +510,7 @@ struct HardwareInstrumentation {
         }
 
         // Select instructions behave like coverage blocks.
-        if (isModeOn(CoverageMode::Edge)) {
+        if (isModeOn(CoverageMode::Edge) || isModeOn(CoverageMode::BasicBlock)) {
           if (SelectInst *S = dyn_cast<SelectInst>(&I)) {
             DelayedInstrumentation instrumentation;
             instrumentation.selectInst = S;
@@ -541,6 +561,8 @@ struct HardwareInstrumentation {
         doSelectFeedback(*target.selectInst, mapPos);
       else if (target.branch)
         doBranchFeedback(*target.branch, mapPos);
+      else if (target.blockStart)
+        doBBFeedback(*target.blockStart, mapPos);
       else {
         exitWithErr("Not a valid coverage point?");
       }

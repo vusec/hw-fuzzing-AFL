@@ -670,7 +670,7 @@ void ModuleSanitizerCoverageAFL::instrumentFunction(
   if (F.hasPersonalityFn() &&
       isAsynchronousEHPersonality(classifyEHPersonality(F.getPersonalityFn())))
     return;
-  if (Options.CoverageType >= SanitizerCoverageOptions::SCK_Edge)
+  if (isModeOn(CoverageMode::SplitCriticalEdges))
     SplitAllCriticalEdges(
         F, CriticalEdgeSplittingOptions().setIgnoreUnreachableDests());
   SmallVector<Instruction *, 8>       IndirCalls;
