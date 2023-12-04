@@ -302,7 +302,7 @@ struct HardwareInstrumentation {
                                    = IsPartOfConditionVec::No) {
     // Each condition only needs one byte to represent all values. This way
     // we can squeeze 4 conditions into one 4 byte slot.
-    Value *condition = IRB.CreateZExtOrTrunc(condition, Int8Ty);
+    Value *condition = IRB.CreateZExtOrTrunc(condition_raw, Int8Ty);
 
     // If this is part of a condition vector, we don't need to do the extra
     // operation below for any but the first condition to convey the 'executed'
