@@ -117,9 +117,8 @@ struct DelayedInstrumentation {
   /// A store/load that provides coverage when it stores/loads tainted data.
   Instruction  *toInstrumentForDFSan = nullptr;
 
-  /// A random instruction at the start of the basic block.
-  /// Used for block coverage.
-  Instruction  *blockStart = nullptr;
+  /// A basic block, used for block coverage.
+  llvm::BasicBlock  *block = nullptr;
 
   /// A select that provides coverage depending on which branch it selects.
   SelectInst   *selectInst = nullptr;
@@ -128,7 +127,7 @@ struct DelayedInstrumentation {
   /// to 0 or 1.
   StoreInst    *toggleStore = nullptr;
 
-  /// A condition brancht hat provides coverade depending on whether it was
+  /// A condition branch hat provides coverade depending on whether it was
   /// taken.
   BranchInst   *branch = nullptr;
 
@@ -154,7 +153,7 @@ struct DelayedInstrumentation {
     if (toggleStore) return getSlotsForToggleOp(*toggleStore);
     // Blocks and branches just need one byte to indicate the status.
     if (branch) return 1;
-    if (blockStart) return 1;
+    if (block) return 1;
     
     exitWithErr("Neither a DFSan, toggle nor select instrumentation?");
   }
@@ -374,13 +373,24 @@ struct HardwareInstrumentation {
     addConditionToCoverageMap(IRB, mapOffset, condition_coverage);
   }
 
-  void doBBFeedback(llvm::Instruction &i, MapElementOffset mapOffset) {
-    IRBuilder<> IRB(&i);
+  void doBBFeedback(llvm::BasicBlock &BB, MapElementOffset mapOffset) {
+    // This code is from the AFL++ default code.
+    BasicBlock::iterator IP = BB.getFirstInsertionPt();
+    const bool IsEntryBB = (&BB == &BB.getParent()->getEntryBlock());
 
-    Value *condition_coverage = ConstantInt::get(Int8Ty, 1);
-    SetNoSanitizeMetadata(condition_coverage);
+    if (IsEntryBB) {
+      // Keep allocas and llvm.localescape calls in the entry block.  Even
+      // if we aren't splitting the block, it's nice for allocas to be before
+      // calls.
+      IP = PrepareToSplitEntryBlock(BB, IP);
+    }
 
-    addToCoverageMap(IRB, mapOffset, condition_coverage, MergeTaint::Or);
+    IRBuilder<> IRB(&*IP);
+
+    Value *coverage = ConstantInt::get(Int8Ty, 1);
+    SetNoSanitizeMetadata(coverage);
+
+    addToCoverageMap(IRB, mapOffset, coverage, MergeTaint::Or);
   }
 
   void doTaintFeedback(llvm::Instruction &i, MapElementOffset mapOffset) {
@@ -493,7 +503,7 @@ struct HardwareInstrumentation {
     for (auto &BB : F) {
       if (isModeOn(CoverageMode::BasicBlock)) {
         DelayedInstrumentation instrumentation;
-        instrumentation.blockStart = BB.getFirstNonPHI();
+        instrumentation.block = &BB;
         queueInstrumentation(instrumentation);
       }
       for (auto &I : BB) {
@@ -561,8 +571,8 @@ struct HardwareInstrumentation {
         doSelectFeedback(*target.selectInst, mapPos);
       else if (target.branch)
         doBranchFeedback(*target.branch, mapPos);
-      else if (target.blockStart)
-        doBBFeedback(*target.blockStart, mapPos);
+      else if (target.block)
+        doBBFeedback(*target.block, mapPos);
       else {
         exitWithErr("Not a valid coverage point?");
       }
