@@ -64,9 +64,7 @@ void checkIfAllBugsFound(const char *outDirCstr) {
     if (found.count(bug) == 0) return;
   }
 
-  // No good way to stop fuzzing, so force exit this and all other processes.
-  int systemRes = system("killall -s SIGKILL afl-fuzz");
-  (void)systemRes;
-  abort();
+  std::cerr << "Found all bugs, exiting...\n";
+  std::exit(0);
 }
 }
