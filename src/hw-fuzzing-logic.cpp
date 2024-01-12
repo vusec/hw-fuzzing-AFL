@@ -6,40 +6,42 @@
 #include <filesystem>
 namespace fs = std::filesystem;
 
-
 static std::set<std::string> readLines(std::string path) {
   std::set<std::string> result;
   std::ifstream         input(path);
-  for (std::string line; std::getline(input, line);)
+  for (std::string line; std::getline(input, line);) {
+    while (!line.empty() && line.back() == '\n')
+      line.pop_back();
+    if (line.empty()) continue;
     result.insert(line);
+  }
   return result;
 }
 
 static std::string extractCause(std::string filename) {
-    std::string result;
-    for (char c : filename) {
-        // Once we reach a % sign, we found the random suffix.
-        if (c == '%')
-            break;
-        if (c == '_')
-            result.push_back(' ');
-        result.push_back(c);
-    }
-    return result;
+  std::string result;
+  for (char c : filename) {
+    // Once we reach a % sign, we found the random suffix.
+    if (c == '%') break;
+    if (c == '_') result.push_back(' ');
+    result.push_back(c);
+  }
+  return result;
 }
 
 static std::set<std::string> getFoundBugs(std::string outDir) {
-    const std::string causesDir = outDir + "/../causes";
+  const std::string causesDir = outDir + "/../causes";
 
-    std::set<std::string> result;
-    for (const auto & entry : fs::directory_iterator(outDir)) {
-        if (!entry.is_regular_file()) continue;
+  std::set<std::string> result;
+  for (const auto &entry : fs::directory_iterator(outDir)) {
+    if (!entry.is_regular_file()) continue;
 
-        std::string filename = entry.path().filename();
-        std::string cause = extractCause(filename);
-        result.insert(cause);
-    }
-    return result;
+    std::string filename = entry.path().filename();
+    std::string cause = extractCause(filename);
+    if (cause.empty()) continue;
+    result.insert(cause);
+  }
+  return result;
 }
 
 extern "C" {
@@ -59,10 +61,8 @@ void checkIfAllBugsFound(const char *outDirCstr) {
   for (std::string bug : expected) {
     // Check if we found the expected bug. If not, return as we are not
     // done yet with fuzzing.
-    if (found.count(bug) == 0)
-      return;
+    if (found.count(bug) == 0) return;
   }
-
 
   // No good way to stop fuzzing, so force exit this and all other processes.
   int systemRes = system("killall -s SIGKILL afl-fuzz");
