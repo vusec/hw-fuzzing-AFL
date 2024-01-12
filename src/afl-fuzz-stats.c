@@ -27,6 +27,8 @@
 #include "envs.h"
 #include <limits.h>
 
+#include "hw-fuzzing-logic.h"
+
 /* Write fuzzer setup file */
 
 void write_setup_file(afl_state_t *afl, u32 argc, char **argv) {
@@ -420,6 +422,10 @@ void maybe_update_plot_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
     return;
 
   }
+
+  // All the code is trash, so let's hook in here to reliably check if all
+  // bugs we have to find for the eval have been found.
+  checkIfAllBugsFound(afl->out_dir);
 
   afl->plot_prev_qp = afl->queued_items;
   afl->plot_prev_pf = afl->pending_favored;
