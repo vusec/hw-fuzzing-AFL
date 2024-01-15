@@ -1,1 +1,0 @@
-void checkIfAllBugsFound(const char *outDirCstr);
