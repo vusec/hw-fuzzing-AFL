@@ -292,7 +292,7 @@
 
 /* Fuzzer stats file, queue stats and plot update intervals (sec): */
 
-#define STATS_UPDATE_SEC 60
+#define STATS_UPDATE_SEC 5
 #define PLOT_UPDATE_SEC 5
 #define QUEUE_UPDATE_SEC 1800
 
