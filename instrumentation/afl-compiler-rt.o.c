@@ -100,12 +100,33 @@ u32       *__afl_fuzz_len = &__afl_fuzz_len_dummy;
 int        __afl_sharedmem_fuzzing __attribute__((weak));
 
 u32 __afl_final_loc;
-// The size of one element in the map. In bytes.
-u32 __afl_map_elem_size = 4;
 u32 __afl_map_size = MAP_SIZE;
 u32 __afl_dictionary_len;
 u64 __afl_map_addr;
 u32 __afl_first_final_loc;
+
+// HWFUZZING CHANGES
+// The size of one element in the map. In bytes.
+// Computed on demand, so use __afl_get_map_elem_size() and don't directly use
+// this variable.
+u32 __afl_map_elem_size = 0;
+static u32 __afl_get_map_elem_size() {
+  if (__afl_map_elem_size == 0) {
+    char *env = getenv("HWFUZZ_COVERAGE");
+    if (env == NULL) {
+      fprintf(stderr, "Didn't set HWFUZZ_COVERAGE variable.");
+      abort();
+    }
+    // By default we just need one byte for the 8-bit counters that ensure
+    // thread safety.
+    __afl_map_elem_size = 1;
+    // Either Toggle or taint need bigger slots to store all data.
+    if (strstr(env, "Toggle") || strstr(env, "Taint"))
+      __afl_map_elem_size = 4;
+  }
+  return __afl_map_elem_size;
+}
+// END HWFUZZING CHANGES
 
 /* 1 if we are running in afl, and the forkserver was started, else 0 */
 u32 __afl_connected = 0;
@@ -293,7 +314,7 @@ static void __afl_map_shm(void) {
 
   if (__afl_final_loc) {
 
-    __afl_map_size = __afl_final_loc += __afl_map_elem_size;  // as we count starting 0
+    __afl_map_size = __afl_final_loc += __afl_get_map_elem_size();  // as we count starting 0
 
     if (getenv("AFL_DUMP_MAP_SIZE")) {
 
@@ -1406,7 +1427,7 @@ __attribute__((constructor(1))) void __afl_auto_second(void) {
 
   if (__afl_final_loc > MAP_INITIAL_SIZE) {
 
-    __afl_first_final_loc = __afl_final_loc + __afl_map_elem_size;
+    __afl_first_final_loc = __afl_final_loc + __afl_get_map_elem_size();
 
     if (__afl_area_ptr && __afl_area_ptr != __afl_area_initial)
       free(__afl_area_ptr);
@@ -1616,12 +1637,12 @@ void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
      to avoid duplicate calls (which can happen as an artifact of the underlying
      implementation in LLVM). */
 
-  *(start++) = __afl_final_loc += __afl_map_elem_size;
+  *(start++) = __afl_final_loc += __afl_get_map_elem_size();
 
   while (start < stop) {
 
     if (R(100) < inst_ratio)
-      *start = __afl_final_loc += __afl_map_elem_size;
+      *start = __afl_final_loc += __afl_get_map_elem_size();
     else
       *start = 4;
 

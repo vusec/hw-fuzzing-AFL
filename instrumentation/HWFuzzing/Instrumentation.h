@@ -21,7 +21,17 @@ using namespace llvm;
 
 
 /// The size of one coverage map element in our coverage map.
-static constexpr unsigned MapElementByteSize = 4U;
+static unsigned MapElementByteSize = 0U;
+static unsigned getMapElementByteSize() {
+  if (MapElementByteSize == 0) {
+    // Mirrors the code in afl-compiler-rt.o.c. We can't share the code because
+    // AFL++ is stupid.
+    MapElementByteSize = 1 ;
+    if (isModeOn(CoverageMode::Taint) || isModeOn(CoverageMode::Toggle))
+      MapElementByteSize = 4
+  }
+  return MapElementByteSize;
+}
 // Offset in the coverage map in elements of size MapElementByteSize.
 typedef unsigned long MapElementOffset;
 
@@ -101,7 +111,7 @@ static unsigned getSlotsForToggleOp(StoreInst &toggleStore) {
   // Each toggle bit counts for going from 0 to 1 and vice versa, so we
   // twice as many feedback slots.
   const unsigned bytes = getBytesForToggleOp(toggleStore);
-  const unsigned slots = (bytes / MapElementByteSize) * 2;
+  const unsigned slots = (bytes / getMapElementByteSize()) * 2;
   // We need always at least two slots to store feedback for toggle to 0 and 1.
   if (slots <= 1) return 2;
 
@@ -136,7 +146,7 @@ struct DelayedInstrumentation {
       // Every PCGUARD slot can store 4 bytes, so we need to calculate the
       // number of taint bits and then return the number of slots we need.
       const unsigned bytes = getBytesForDFSanMemoryOp(*toInstrumentForDFSan);
-      const unsigned slots = bytes / MapElementByteSize;
+      const unsigned slots = bytes / getMapElementByteSize();
       // We need always at least one slot to store some feedback.
       if (slots == 0) return 1;
       // More than 4 slots means we have memory op > 128 bits. That's most
@@ -216,7 +226,7 @@ struct HardwareInstrumentation {
 
   void addToCoverageMap(IRBuilder<> &IRB, MapElementOffset mapOffset,
                         Value *coverage, MergeTaint merge_mode) {
-    unsigned mapOffsetInBytes = mapOffset * MapElementByteSize;
+    unsigned mapOffsetInBytes = mapOffset * getMapElementByteSize();
   
     // Bounds check the map offset.
     if (mapOffset >= lastMapSize)

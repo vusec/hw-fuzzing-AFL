@@ -40,6 +40,7 @@ static bool isModeOn(CoverageMode mode) {
   assert(mode != CoverageMode::Half1);
   assert(mode != CoverageMode::Half2);
 
+  // Also update this name in compiler-rt.o.c because afl++ is fucking stupid.
   std::string envVarName = "HWFUZZ_COVERAGE";
   const char *baseline_string = std::getenv(envVarName.c_str());
   if (baseline_string == nullptr) {
