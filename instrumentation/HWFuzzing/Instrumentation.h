@@ -26,7 +26,7 @@ static unsigned getMapElementByteSize() {
   if (MapElementByteSize == 0) {
     // Mirrors the code in afl-compiler-rt.o.c. We can't share the code because
     // AFL++ is stupid.
-    MapElementByteSize = 1 ;
+    MapElementByteSize = 1;
     if (isModeOn(CoverageMode::Taint) || isModeOn(CoverageMode::Toggle))
       MapElementByteSize = 4;
   }
@@ -226,7 +226,9 @@ struct HardwareInstrumentation {
 
   void addToCoverageMap(IRBuilder<> &IRB, MapElementOffset mapOffset,
                         Value *coverage, MergeTaint merge_mode) {
-    unsigned mapOffsetInBytes = mapOffset * getMapElementByteSize();
+    // PCGuard uses 4 byte integer arrays to store the offsets into the final
+    // coverage map.
+    unsigned mapOffsetInBytes = mapOffset * 4;
   
     // Bounds check the map offset.
     if (mapOffset >= lastMapSize)
