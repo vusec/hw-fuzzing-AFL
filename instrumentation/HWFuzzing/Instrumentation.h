@@ -28,7 +28,7 @@ static unsigned getMapElementByteSize() {
     // AFL++ is stupid.
     MapElementByteSize = 1 ;
     if (isModeOn(CoverageMode::Taint) || isModeOn(CoverageMode::Toggle))
-      MapElementByteSize = 4
+      MapElementByteSize = 4;
   }
   return MapElementByteSize;
 }
