@@ -719,6 +719,9 @@ save_if_interesting(afl_state_t *afl, void *mem, u32 len, u8 fault) {
 
       ++afl->total_crashes;
 
+// HW-FUZZING: keep all crashes to do proper analysis later on. The coverage
+// heuristic filters out important crashes...
+#if 1
       if (afl->saved_crashes >= KEEP_UNIQUE_CRASH) { return keeping; }
 
       if (likely(!afl->non_instrumented_mode)) {
@@ -730,6 +733,7 @@ save_if_interesting(afl_state_t *afl, void *mem, u32 len, u8 fault) {
         if (!has_new_bits(afl, afl->virgin_crash)) { return keeping; }
 
       }
+#endif
 
       if (unlikely(!afl->saved_crashes) &&
           (afl->afl_env.afl_no_crash_readme != 1)) {
