@@ -19,7 +19,6 @@
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/Dominators.h"
-#include "llvm/IR/EHPersonalities.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/IRBuilder.h"
@@ -38,7 +37,8 @@
 #include "llvm/Support/SpecialCaseList.h"
 #include "llvm/Support/VirtualFileSystem.h"
 #include "llvm/Support/raw_ostream.h"
-#include "llvm/TargetParser/Triple.h"
+#include "llvm/Object/Binary.h"
+#include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/Transforms/Instrumentation.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
@@ -49,6 +49,9 @@
 #include "config.h"
 #include "debug.h"
 #include "afl-llvm-common.h"
+
+#include "HWFuzzing/CoverageMode.h"
+#include "HWFuzzing/Instrumentation.h"
 
 using namespace llvm;
 
@@ -167,6 +170,12 @@ class ModuleSanitizerCoverageAFL
   std::pair<Value *, Value *> CreateSecStartEnd(Module &M, const char *Section,
                                                 Type *Ty);
 
+  void SetNoSanitizeMetadata(Value *V) {
+    Instruction *I = dyn_cast<Instruction>(V);
+    if (I)
+      SetNoSanitizeMetadata(I);
+  }
+
   void SetNoSanitizeMetadata(Instruction *I) {
 
     I->setMetadata(I->getModule()->getMDKindID("nosanitize"),
@@ -207,6 +216,7 @@ class ModuleSanitizerCoverageAFL
   ConstantInt    *One = NULL;
   ConstantInt    *Zero = NULL;
 
+  std::unique_ptr<HardwareInstrumentation> hwInstrumentation;
 };
 
 }  // namespace
@@ -468,6 +478,23 @@ bool ModuleSanitizerCoverageAFL::instrumentModule(
   SanCovTracePCGuard =
       M.getOrInsertFunction(SanCovTracePCGuardName, VoidTy, Int32PtrTy);
 
+  hwInstrumentation.reset(new HardwareInstrumentation());
+  hwInstrumentation->C = C;
+  hwInstrumentation->AFLMapPtr = AFLMapPtr;
+  hwInstrumentation->IntptrTy = IntptrTy;
+  hwInstrumentation->IntptrPtrTy = IntptrPtrTy;
+  hwInstrumentation->Int64Ty = Int64Ty;
+  hwInstrumentation->Int64PtrTy = Int64PtrTy;
+  hwInstrumentation->Int32Ty = Int32Ty;
+  hwInstrumentation->Int32PtrTy = Int32PtrTy;
+  hwInstrumentation->Int16Ty = Int16Ty;
+  hwInstrumentation->Int8Ty = Int8Ty;
+  hwInstrumentation->Int1Ty = Int1Ty;
+  hwInstrumentation->Int1PtrTy = Int1PtrTy;
+  // This will be initialized later, so we pass a pointer to the field that will
+  // be filled out by the default AFL++ code.
+  hwInstrumentation->FunctionGuardArray = &FunctionGuardArray;
+
   for (auto &F : M)
     instrumentFunction(F, DTCallback, PDTCallback);
 
@@ -643,7 +670,7 @@ void ModuleSanitizerCoverageAFL::instrumentFunction(
   if (F.hasPersonalityFn() &&
       isAsynchronousEHPersonality(classifyEHPersonality(F.getPersonalityFn())))
     return;
-  if (Options.CoverageType >= SanitizerCoverageOptions::SCK_Edge)
+  if (isModeOn(CoverageMode::SplitCriticalEdges))
     SplitAllCriticalEdges(
         F, CriticalEdgeSplittingOptions().setIgnoreUnreachableDests());
   SmallVector<Instruction *, 8>       IndirCalls;
@@ -801,358 +828,24 @@ void ModuleSanitizerCoverageAFL::CreateFunctionLocalArrays(
 }
 
 bool ModuleSanitizerCoverageAFL::InjectCoverage(
-    Function &F, ArrayRef<BasicBlock *> AllBlocks, bool IsLeafFunc) {
-
-  uint32_t        cnt_cov = 0, cnt_sel = 0, cnt_sel_inc = 0;
-  static uint32_t first = 1;
-
-  for (auto &BB : F) {
-
-    for (auto &IN : BB) {
-
-      CallInst *callInst = nullptr;
-
-      if ((callInst = dyn_cast<CallInst>(&IN))) {
-
-        Function *Callee = callInst->getCalledFunction();
-        if (!Callee) continue;
-        if (callInst->getCallingConv() != llvm::CallingConv::C) continue;
-        StringRef FuncName = Callee->getName();
-        if (!FuncName.compare(StringRef("dlopen")) ||
-            !FuncName.compare(StringRef("_dlopen"))) {
-
-          fprintf(stderr,
-                  "WARNING: dlopen() detected. To have coverage for a library "
-                  "that your target dlopen()'s this must either happen before "
-                  "__AFL_INIT() or you must use AFL_PRELOAD to preload all "
-                  "dlopen()'ed libraries!\n");
-          continue;
-
-        }
-
-        if (!FuncName.compare(StringRef("__afl_coverage_interesting"))) {
-
-          cnt_cov++;
-
-        }
-
-      }
-
-      SelectInst *selectInst = nullptr;
-
-      if ((selectInst = dyn_cast<SelectInst>(&IN))) {
-
-        Value *c = selectInst->getCondition();
-        auto   t = c->getType();
-        if (t->getTypeID() == llvm::Type::IntegerTyID) {
-
-          cnt_sel++;
-          cnt_sel_inc += 2;
-
-        }
-
-#if (LLVM_VERSION_MAJOR >= 12)
-        else if (t->getTypeID() == llvm::Type::FixedVectorTyID) {
-
-          FixedVectorType *tt = dyn_cast<FixedVectorType>(t);
-          if (tt) {
-
-            cnt_sel++;
-            cnt_sel_inc += (tt->getElementCount().getKnownMinValue() * 2);
-
-          }
-
-        }
-
-#endif
-
-      }
-
-    }
-
-  }
-
-  /* Create PCGUARD array */
-  CreateFunctionLocalArrays(F, AllBlocks, first + cnt_cov + cnt_sel_inc);
-  if (first) { first = 0; }
-  selects += cnt_sel;
-
-  uint32_t special = 0, local_selects = 0, skip_next = 0;
-
-  for (auto &BB : F) {
-
-    for (auto &IN : BB) {
-
-      CallInst *callInst = nullptr;
-
-      /*
-                                std::string errMsg;
-                                raw_string_ostream os(errMsg);
-                            IN.print(os);
-                            fprintf(stderr, "X: %s\n", os.str().c_str());
-      */
-      if ((callInst = dyn_cast<CallInst>(&IN))) {
-
-        Function *Callee = callInst->getCalledFunction();
-        if (!Callee) continue;
-        if (callInst->getCallingConv() != llvm::CallingConv::C) continue;
-        StringRef FuncName = Callee->getName();
-        if (FuncName.compare(StringRef("__afl_coverage_interesting"))) continue;
-
-        IRBuilder<> IRB(callInst);
-
-        if (!FunctionGuardArray) {
-
-          fprintf(stderr,
-                  "SANCOV: FunctionGuardArray is NULL, failed to emit "
-                  "instrumentation.");
-          continue;
-
-        }
-
-        Value *GuardPtr = IRB.CreateIntToPtr(
-            IRB.CreateAdd(
-                IRB.CreatePointerCast(FunctionGuardArray, IntptrTy),
-                ConstantInt::get(IntptrTy, (++special + AllBlocks.size()) * 4)),
-            Int32PtrTy);
-
-        LoadInst *Idx = IRB.CreateLoad(IRB.getInt32Ty(), GuardPtr);
-        ModuleSanitizerCoverageAFL::SetNoSanitizeMetadata(Idx);
-
-        callInst->setOperand(1, Idx);
-
-      }
-
-      SelectInst *selectInst = nullptr;
-
-      if (!skip_next && (selectInst = dyn_cast<SelectInst>(&IN))) {
-
-        uint32_t    vector_cnt = 0;
-        Value      *condition = selectInst->getCondition();
-        Value      *result;
-        auto        t = condition->getType();
-        IRBuilder<> IRB(selectInst->getNextNode());
-
-        if (t->getTypeID() == llvm::Type::IntegerTyID) {
-
-          if (!FunctionGuardArray) {
-
-            fprintf(stderr,
-                    "SANCOV: FunctionGuardArray is NULL, failed to emit "
-                    "instrumentation.");
-            continue;
-
-          }
-
-          auto GuardPtr1 = IRB.CreateIntToPtr(
-              IRB.CreateAdd(
-                  IRB.CreatePointerCast(FunctionGuardArray, IntptrTy),
-                  ConstantInt::get(
-                      IntptrTy,
-                      (cnt_cov + ++local_selects + AllBlocks.size()) * 4)),
-              Int32PtrTy);
-
-          auto GuardPtr2 = IRB.CreateIntToPtr(
-              IRB.CreateAdd(
-                  IRB.CreatePointerCast(FunctionGuardArray, IntptrTy),
-                  ConstantInt::get(
-                      IntptrTy,
-                      (cnt_cov + ++local_selects + AllBlocks.size()) * 4)),
-              Int32PtrTy);
-
-          result = IRB.CreateSelect(condition, GuardPtr1, GuardPtr2);
-
-        } else
-
-#if LLVM_VERSION_MAJOR >= 14
-            if (t->getTypeID() == llvm::Type::FixedVectorTyID) {
-
-          FixedVectorType *tt = dyn_cast<FixedVectorType>(t);
-          if (tt) {
-
-            uint32_t elements = tt->getElementCount().getFixedValue();
-            vector_cnt = elements;
-            if (elements) {
-
-              FixedVectorType *GuardPtr1 =
-                  FixedVectorType::get(Int32PtrTy, elements);
-              FixedVectorType *GuardPtr2 =
-                  FixedVectorType::get(Int32PtrTy, elements);
-              Value *x, *y;
-
-              if (!FunctionGuardArray) {
-
-                fprintf(stderr,
-                        "SANCOV: FunctionGuardArray is NULL, failed to emit "
-                        "instrumentation.");
-                continue;
-
-              }
-
-              Value *val1 = IRB.CreateIntToPtr(
-                  IRB.CreateAdd(
-                      IRB.CreatePointerCast(FunctionGuardArray, IntptrTy),
-                      ConstantInt::get(
-                          IntptrTy,
-                          (cnt_cov + ++local_selects + AllBlocks.size()) * 4)),
-                  Int32PtrTy);
-              x = IRB.CreateInsertElement(GuardPtr1, val1, (uint64_t)0);
-
-              Value *val2 = IRB.CreateIntToPtr(
-                  IRB.CreateAdd(
-                      IRB.CreatePointerCast(FunctionGuardArray, IntptrTy),
-                      ConstantInt::get(
-                          IntptrTy,
-                          (cnt_cov + ++local_selects + AllBlocks.size()) * 4)),
-                  Int32PtrTy);
-              y = IRB.CreateInsertElement(GuardPtr2, val2, (uint64_t)0);
-
-              for (uint64_t i = 1; i < elements; i++) {
-
-                val1 = IRB.CreateIntToPtr(
-                    IRB.CreateAdd(
-                        IRB.CreatePointerCast(FunctionGuardArray, IntptrTy),
-                        ConstantInt::get(IntptrTy, (cnt_cov + ++local_selects +
-                                                    AllBlocks.size()) *
-                                                       4)),
-                    Int32PtrTy);
-                x = IRB.CreateInsertElement(x, val1, i);
-
-                val2 = IRB.CreateIntToPtr(
-                    IRB.CreateAdd(
-                        IRB.CreatePointerCast(FunctionGuardArray, IntptrTy),
-                        ConstantInt::get(IntptrTy, (cnt_cov + ++local_selects +
-                                                    AllBlocks.size()) *
-                                                       4)),
-                    Int32PtrTy);
-                y = IRB.CreateInsertElement(y, val2, i);
-
-              }
-
-              /*
-                          std::string errMsg;
-                          raw_string_ostream os(errMsg);
-                      x->print(os);
-                      fprintf(stderr, "X: %s\n", os.str().c_str());
-              */
-              result = IRB.CreateSelect(condition, x, y);
-
-            }
-
-          }
-
-        } else
-
-#endif
-        {
-
-          unhandled++;
-          continue;
-
-        }
-
-        uint32_t vector_cur = 0;
-
-        /* Load SHM pointer */
-
-        LoadInst *MapPtr =
-            IRB.CreateLoad(PointerType::get(Int8Ty, 0), AFLMapPtr);
-        ModuleSanitizerCoverageAFL::SetNoSanitizeMetadata(MapPtr);
-
-        /*
-                    std::string errMsg;
-                    raw_string_ostream os(errMsg);
-                    result->print(os);
-                    fprintf(stderr, "X: %s\n", os.str().c_str());
-        */
-
-        while (1) {
-
-          /* Get CurLoc */
-          LoadInst *CurLoc = nullptr;
-          Value    *MapPtrIdx = nullptr;
-
-          /* Load counter for CurLoc */
-          if (!vector_cnt) {
-
-            CurLoc = IRB.CreateLoad(IRB.getInt32Ty(), result);
-            ModuleSanitizerCoverageAFL::SetNoSanitizeMetadata(CurLoc);
-            MapPtrIdx = IRB.CreateGEP(Int8Ty, MapPtr, CurLoc);
-
-          } else {
-
-            auto element = IRB.CreateExtractElement(result, vector_cur++);
-            auto elementptr = IRB.CreateIntToPtr(element, Int32PtrTy);
-            auto elementld = IRB.CreateLoad(IRB.getInt32Ty(), elementptr);
-            ModuleSanitizerCoverageAFL::SetNoSanitizeMetadata(elementld);
-            MapPtrIdx = IRB.CreateGEP(Int8Ty, MapPtr, elementld);
-
-          }
-
-          if (use_threadsafe_counters) {
-
-            IRB.CreateAtomicRMW(llvm::AtomicRMWInst::BinOp::Add, MapPtrIdx, One,
-#if LLVM_VERSION_MAJOR >= 13
-                                llvm::MaybeAlign(1),
-#endif
-                                llvm::AtomicOrdering::Monotonic);
-
-          } else {
-
-            LoadInst *Counter = IRB.CreateLoad(IRB.getInt8Ty(), MapPtrIdx);
-            ModuleSanitizerCoverageAFL::SetNoSanitizeMetadata(Counter);
-
-            /* Update bitmap */
-
-            Value *Incr = IRB.CreateAdd(Counter, One);
-
-            if (skip_nozero == NULL) {
-
-              auto cf = IRB.CreateICmpEQ(Incr, Zero);
-              auto carry = IRB.CreateZExt(cf, Int8Ty);
-              Incr = IRB.CreateAdd(Incr, carry);
-
-            }
-
-            StoreInst *StoreCtx = IRB.CreateStore(Incr, MapPtrIdx);
-            ModuleSanitizerCoverageAFL::SetNoSanitizeMetadata(StoreCtx);
-
-          }
-
-          if (!vector_cnt) {
-
-            vector_cnt = 2;
-            break;
-
-          } else if (vector_cnt == vector_cur) {
-
-            break;
-
-          }
-
-        }
-
-        skip_next = 1;
-        instr += vector_cnt;
-
-      } else {
-
-        skip_next = 0;
-
-      }
-
-    }
-
-  }
-
-  if (AllBlocks.empty() && !special && !local_selects) return false;
-
-  if (!AllBlocks.empty())
-    for (size_t i = 0, N = AllBlocks.size(); i < N; i++)
-      InjectCoverageAtBlock(F, *AllBlocks[i], i, IsLeafFunc);
-
+    Function &F, ArrayRef<BasicBlock *> AllBlocksDummy, bool IsLeafFunc) {
+
+  if (hwInstrumentation.get() == nullptr)
+    exitWithErr("Didn't initialize hwInstrumentation?");
+
+  // Find all coverage points we plan to inject.
+  unsigned neededSlots = hwInstrumentation->findCoveragePoints(F);
+
+  // Dummy variable. We don't do block coverage.
+  std::vector<BasicBlock *> NoBlocksDummy;
+  // Create PCGuard array to store the coverage.
+  CreateFunctionLocalArrays(F, NoBlocksDummy, neededSlots);
+
+  // Inject instrumentation that fills out the coverage slots during
+  // runtime with the respective data.
+  hwInstrumentation->injectCoverage();
+  
   return true;
-
 }
 
 // On every indirect call we call a run-time function
