@@ -1,0 +1,2 @@
+fun:__afl_persistent_loop=uninstrumented
+fun:__afl_manual_init=uninstrumented
